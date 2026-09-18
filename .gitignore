@@ -1,0 +1,62 @@
+# ==============================================================================
+# Raylib + ImGui + rlImGui Gitignore Template
+# ==============================================================================
+
+# --- Compiled Binaries & Libraries ---
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.out
+*.app
+
+# --- Build & Output Directories ---
+bin/
+obj/
+build/
+cmake-build-*/
+out/
+.premake/
+Makefile
+
+# --- IDEs & Text Editors ---
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# CLion / IntelliJ
+.idea/
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+
+# --- Dependency Management & Clones ---
+# Ignore third-party dependency folders if you download/clone them locally
+# (Remove these lines if you manage them as Git Submodules instead)
+vendor/
+thirdparty/
+dependencies/imgui/
+dependencies/raylib/
+dependencies/rlImGui/
+
+# --- Operating System Files ---
+.DS_Store
+Thumbs.db
+
+# --- Crash Logs & Temporary Files ---
+*.log
+*.tmp
