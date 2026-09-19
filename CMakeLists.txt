@@ -2,8 +2,9 @@ cmake_minimum_required(VERSION 3.24)
 project(RaylibImGuiApp LANGUAGES CXX)
 
 # Force modern C++ standard
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF) # Ensures strict ISO C++23 without non-standard compiler extensions
 
 if(WIN32)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc -static-libstdc++")
