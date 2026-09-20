@@ -53,8 +53,15 @@ int main() {
     // Interaction & display flags
     int hovered_point_index = -1;
     int dragged_point_index = -1;
+    cdt::Vector2d drag_offset_world{0.0, 0.0};
     bool show_point_ids = false;
     bool show_coordinates = false;
+
+    // Point geometry & interaction constants (World Space)
+    constexpr float point_outer_radius = 8.5f;
+    constexpr float point_inner_radius = 5.5f;
+    constexpr double base_pick_radius_world = point_outer_radius; // Exact pixel-perfect match to visual outer circle
+    constexpr double min_pick_radius_screen = 8.0;                // Accessibility floor when zoomed far out
 
     // Color palette
     constexpr Color background_color  = { 22, 25, 32, 255 };
@@ -76,50 +83,65 @@ int main() {
         const bool is_panning = camera_controller.IsPanning() || IsKeyDown(KEY_SPACE);
 
         // 2. Entity Interaction Handling (World-Space)
-        constexpr float pick_radius = 12.0f; // Screen-space pixel radius for clicking
-        hovered_point_index = -1;
-
-        if (!mouse_captured && !is_panning) {
-            // Find hovered point by comparing screen positions for consistent feel across zoom levels
-            for (int i = 0; i < static_cast<int>(points.size()); ++i) {
-                const Vector2 pt_screen = camera_controller.WorldToScreen(points[static_cast<std::size_t>(i)].position);
-                if (CheckCollisionPointCircle(mouse_screen_pos, pt_screen, pick_radius)) {
-                    hovered_point_index = i;
-                    break;
-                }
-            }
-
-            // Left-click point drag
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hovered_point_index != -1) {
-                dragged_point_index = hovered_point_index;
-            }
-            if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-                dragged_point_index = -1;
-            }
-            if (dragged_point_index >= 0 && dragged_point_index < static_cast<int>(points.size()) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-                points[static_cast<std::size_t>(dragged_point_index)].position = mouse_world_pos;
-            } else if (dragged_point_index >= static_cast<int>(points.size())) {
-                dragged_point_index = -1;
-            }
-
-            // Add new point on left click in empty space
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hovered_point_index == -1 && dragged_point_index == -1) {
-                points.push_back({mouse_world_pos, next_point_id++});
-            }
-
-            // Remove point on right click
-            if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && hovered_point_index != -1 && hovered_point_index < static_cast<int>(points.size())) {
-                points.erase(points.begin() + hovered_point_index);
-                if (dragged_point_index == hovered_point_index) {
-                    dragged_point_index = -1;
-                } else if (dragged_point_index > hovered_point_index) {
-                    --dragged_point_index;
-                }
-                hovered_point_index = -1; // Reset after deletion so subsequent checks this frame don't use stale index
-            }
+        if (mouse_captured || is_panning) {
+            hovered_point_index = -1;
+            dragged_point_index = -1;
         } else {
-            if (is_panning) {
+            // Safety bounds check for dragged point
+            if (dragged_point_index >= static_cast<int>(points.size())) {
                 dragged_point_index = -1;
+            }
+
+            // State A: A point is actively being dragged
+            if (dragged_point_index != -1) {
+                // Keep hovered state locked to the dragged point
+                hovered_point_index = dragged_point_index;
+
+                if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                    points[static_cast<std::size_t>(dragged_point_index)].position = mouse_world_pos + drag_offset_world;
+                }
+                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                    dragged_point_index = -1;
+                }
+            } else {
+                // State B: Idle / Hovering (search nearest point in world space)
+                const double effective_world_radius = std::max(
+                    base_pick_radius_world,
+                    min_pick_radius_screen / camera_controller.GetZoom()
+                );
+                const double max_allowed_dist_sq = effective_world_radius * effective_world_radius;
+                double min_dist_sq = max_allowed_dist_sq;
+                int closest_index = -1;
+
+                for (int i = 0; i < static_cast<int>(points.size()); ++i) {
+                    const cdt::Vector2d diff = mouse_world_pos - points[static_cast<std::size_t>(i)].position;
+                    const double dist_sq = diff.dot(diff); // Self dot-product avoids sqrt
+                    if (dist_sq <= min_dist_sq) {
+                        min_dist_sq = dist_sq;
+                        closest_index = i;
+                    }
+                }
+                hovered_point_index = closest_index;
+
+                // Left-click: drag existing point or create a new one in empty space
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    if (hovered_point_index != -1) {
+                        dragged_point_index = hovered_point_index;
+                        drag_offset_world = points[static_cast<std::size_t>(hovered_point_index)].position - mouse_world_pos;
+                    } else {
+                        points.push_back({mouse_world_pos, next_point_id++});
+                    }
+                }
+            }
+
+            // Right-click deletion: reliably delete dragged point if dragging, or hovered point if idle
+            if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+                const int target_to_delete = (dragged_point_index != -1) ? dragged_point_index : hovered_point_index;
+                if (target_to_delete != -1 && target_to_delete < static_cast<int>(points.size())) {
+                    points.erase(points.begin() + target_to_delete);
+                    dragged_point_index = -1;
+                    hovered_point_index = -1;
+                }
             }
         }
 
@@ -149,8 +171,8 @@ int main() {
                 }
 
                 const Vector2 pos_v2 = pt.position.to_raylib();
-                DrawCircleV(pos_v2, 8.5f, point_outer_color);
-                DrawCircleV(pos_v2, 5.5f, current_color);
+                DrawCircleV(pos_v2, point_outer_radius, point_outer_color);
+                DrawCircleV(pos_v2, point_inner_radius, current_color);
             }
         }
         EndMode2D();
@@ -217,7 +239,7 @@ int main() {
             ImGui::Separator();
 
             ImGui::Text("Total Points: %zu", points.size());
-            if (hovered_point_index >= 0 && hovered_point_index < static_cast<int>(points.size())) {
+            if (hovered_point_index != -1 && hovered_point_index < static_cast<int>(points.size())) {
                 const auto& p = points[static_cast<std::size_t>(hovered_point_index)];
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "Hovered: P%d (%.1f, %.1f)", p.id, p.position.x, p.position.y);
             } else {
