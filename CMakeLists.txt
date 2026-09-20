@@ -40,6 +40,7 @@ FetchContent_MakeAvailable(rlimgui)
 # Define our executable target
 add_executable(${PROJECT_NAME} 
     src/main.cpp
+    src/app/CameraController.cpp
     ${rlimgui_SOURCE_DIR}/rlImGui.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -49,6 +50,7 @@ add_executable(${PROJECT_NAME}
 
 # 1. Explicitly tell the compiler where to find headers
 target_include_directories(${PROJECT_NAME} PRIVATE 
+    src
     ${imgui_SOURCE_DIR}
     ${rlimgui_SOURCE_DIR}
 )
