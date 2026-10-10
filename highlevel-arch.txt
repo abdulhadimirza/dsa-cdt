@@ -1,0 +1,129 @@
+PROJECT: Dynamic Constrained Delaunay Triangulation
+TECH: C++, raylib, Dear ImGui
+
+CORE PRINCIPLES
+- Editable geometry is the source of truth.
+- Validation derives which geometry is meaningful.
+- UI, rendering, validation, and triangulation are decoupled.
+- Invalid geometry is ignored, not destructively deleted.
+- The CDT core is independent of raylib and Dear ImGui.
+- The architecture should remain simple and easy to extend.
+
+
+COMPONENTS
+
+1. Canvas / Viewport [Existing]
+   - Infinite grid, panning, zooming, coordinate conversion.
+   - Independent of geometry semantics.
+
+2. Input & Editor
+   - Create, select, move, and delete vertices.
+   - Connect vertices and select edge types.
+   - Manage active tools, selection, and editor state.
+   - Translate user input into model operations.
+   - Distinguish canvas navigation from geometry editing.
+
+3. Editable Geometry Model
+   - Own vertices and typed edges.
+   - Edge types: Border, Obstacle, etc.
+   - Preserve incomplete and invalid geometry.
+   - Support editing without knowing validation or rendering rules.
+
+4. Geometry Validator / Region Analyzer
+   - Identify closed loops of the same edge type.
+   - Reject self-intersecting polygons.
+   - Detect intersecting or overlapping edges.
+   - Ignore conflicting non-border edges.
+   - Propagate the effects of ignored edges to affected loops.
+   - Inactivate any polygon whose loop contains ignored edges.
+   - Re-evaluate validity after geometry changes.
+   - Expose derived validity states for rendering and mesh input.
+
+5. Renderer
+   - Draw vertices, edges, polygons, and regions.
+   - Use colors to distinguish geometry states.
+   - Display selection and hover feedback.
+   - Consume model and validation results; do not calculate validity.
+
+6. CDT / Mesh Generator [Future]
+   - Consume validated map geometry only.
+   - Generate no mesh unless a valid border exists.
+   - Consider only eligible vertices inside the border.
+   - Respect valid obstacle polygons and constraints.
+   - Remain independent of editor and rendering implementation.
+
+
+GEOMETRY RULES
+
+BORDER
+- Exactly one active, valid border defines the map domain.
+- The first completed valid border loop becomes the active border.
+- Additional border loops are ignored while the active border exists.
+- If the active border is deleted or becomes invalid, re-evaluate
+  the remaining valid border candidates in completion order.
+- Border edges take priority over intersecting non-border edges.
+- An incomplete or self-intersecting border is invalid.
+- No valid active border means no mesh generation.
+
+OBSTACLES
+- Must form closed, non-self-intersecting loops.
+- All edges in a loop must have the same type.
+- Intersecting non-border edges are ignored.
+- A loop containing ignored edges is inactive.
+- A polygon crossing the border becomes inactive when its
+  conflicting edges are ignored and its loop is broken.
+- Obstacle polygons outside the border do not contribute to the map.
+- Invalidated polygons remain editable and can become valid again.
+
+VERTICES AND INCOMPLETE GEOMETRY
+- Open chains and stray edges remain editable.
+- Isolated vertices do not contribute to mesh generation.
+- Only eligible vertices inside the active border are considered
+  for mesh generation.
+- Moving or deleting vertices triggers revalidation.
+- Deleting a vertex removes the vertex and its incident edges.
+- Surviving edges remain editable, even if their former polygon
+  no longer exists as a valid region.
+- Previously invalid geometry may become valid again after editing.
+
+INTERSECTIONS
+- Intended adjacent edges sharing their vertex are allowed.
+- Improper intersections and overlapping segments are conflicts.
+- Conflicting non-border edges are ignored.
+- Border edges are preserved when conflicting with other edges.
+- Ignore the intersecting edges and account for the resulting
+  chain and polygon invalidation effects.
+- Near-coincident geometry and tolerance policies are deferred.
+- Geometry predicates should be reusable by the CDT where possible.
+
+
+DATA FLOW
+
+User Input
+    -> Input & Editor
+    -> Editable Geometry Model
+    -> Geometry Validator / Region Analyzer
+    -> Validated Map
+         -> Renderer
+         -> CDT Mesh Generator
+
+
+DESIGN GUIDELINES
+- Separate editor state from geometry data.
+- Separate validation rules from rendering.
+- Treat validity as derived state, not a destructive edit.
+- Keep the core independently testable without a window.
+- Do not expose internal mesh topology to the UI.
+- Reuse geometric predicates where appropriate.
+- Avoid premature abstractions and optimization.
+- Create detailed sub-designs when implementing components.
+
+
+DECISIONS TO SETTLE LATER
+- Whether touching unrelated polygons at a vertex is allowed.
+- How geometric tolerances and near-coincident edges are handled.
+- Whether edge snapping will be supported.
+- How numerical robustness and degenerate cases are handled
+  during mesh generation.
+- How detailed validation feedback should be presented beyond
+  the chosen color-based visual distinction.
