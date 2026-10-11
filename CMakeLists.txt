@@ -41,6 +41,10 @@ FetchContent_MakeAvailable(rlimgui)
 add_executable(${PROJECT_NAME} 
     src/main.cpp
     src/app/CameraController.cpp
+    src/model/GeometryModel.cpp
+    src/editor/EditorController.cpp
+    src/render/SceneRenderer.cpp
+    src/ui/ControlPanel.cpp
     ${rlimgui_SOURCE_DIR}/rlImGui.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp

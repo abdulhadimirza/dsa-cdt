@@ -49,11 +49,12 @@ bool CameraController::IsPanning() const noexcept {
 }
 
 Vector2d CameraController::ScreenToWorld(Vector2 screen_pos) const noexcept {
-    return Vector2d::from_raylib(GetScreenToWorld2D(screen_pos, camera));
+    const Vector2 world = GetScreenToWorld2D(screen_pos, camera);
+    return Vector2d{world.x, world.y};
 }
 
 Vector2 CameraController::WorldToScreen(Vector2d world_pos) const noexcept {
-    return GetWorldToScreen2D(world_pos.to_raylib(), camera);
+    return GetWorldToScreen2D(Vector2{static_cast<float>(world_pos.x), static_cast<float>(world_pos.y)}, camera);
 }
 
 void CameraController::SetZoom(float z) noexcept {
