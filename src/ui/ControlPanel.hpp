@@ -5,15 +5,16 @@
 #include "model/GeometryModel.hpp"
 #include "render/SceneRenderer.hpp"
 
+#include <optional>
+
 #include "raylib.h"
 
 namespace cdt {
 
 struct ControlRequests {
     bool reset_view{false};
-    bool reset_default_vertices{false};
-    bool generate_random_vertices{false};
-    bool clear_vertices{false};
+    bool clear_geometry{false};
+    std::optional<EditorTool> selected_tool;
 };
 
 class ControlPanel {

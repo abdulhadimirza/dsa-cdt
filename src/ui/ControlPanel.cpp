@@ -9,7 +9,7 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
     ControlRequests requests{};
 
     ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(300.0f, 380.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300.0f, 420.0f), ImGuiCond_FirstUseEver);
 
     if (ImGui::Begin("Canvas & Points Controls")) {
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Camera & World Space");
@@ -22,9 +22,10 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
 
         ImGui::Spacing();
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Delaunay Point Set");
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Geometry Editor");
         ImGui::Separator();
         ImGui::Text("Total Points: %zu", model.VertexCount());
+        ImGui::Text("Edges: %zu   Closed loops: %zu", model.Edges().size(), model.Loops().size());
         const Vertex* hovered = editor.hovered_vertex ? model.FindVertex(*editor.hovered_vertex) : nullptr;
         if (hovered) {
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "Hovered: P%llu (%.1f, %.1f)",
@@ -37,9 +38,14 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
         ImGui::Checkbox("Show Point IDs", &options.show_vertex_ids);
         ImGui::Checkbox("Show Coordinates", &options.show_coordinates);
         ImGui::Separator();
-        requests.reset_default_vertices = ImGui::Button("Reset Default Points", ImVec2(-1.0f, 24.0f));
-        requests.generate_random_vertices = ImGui::Button("Generate Random Points", ImVec2(-1.0f, 24.0f));
-        requests.clear_vertices = ImGui::Button("Clear Points", ImVec2(-1.0f, 24.0f));
+        if (ImGui::RadioButton("Add / Move", editor.active_tool == EditorTool::AddMove))
+            requests.selected_tool = EditorTool::AddMove;
+        if (ImGui::RadioButton("Draw Border", editor.active_tool == EditorTool::Border))
+            requests.selected_tool = EditorTool::Border;
+        if (ImGui::RadioButton("Draw Obstacle", editor.active_tool == EditorTool::Obstacle))
+            requests.selected_tool = EditorTool::Obstacle;
+        ImGui::TextDisabled("Click vertices in sequence; click the first again to close. Esc cancels.");
+        requests.clear_geometry = ImGui::Button("Clear Geometry", ImVec2(-1.0f, 24.0f));
     }
     ImGui::End();
 

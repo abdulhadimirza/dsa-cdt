@@ -13,11 +13,13 @@ struct EditorInput {
     bool left_down{false};
     bool left_released{false};
     bool right_pressed{false};
+    bool escape_pressed{false};
 };
 
 class EditorController {
 public:
     void Update(const EditorInput& input, GeometryModel& model);
+    void SetTool(EditorTool tool) noexcept;
     void ClearInteraction() noexcept;
     [[nodiscard]] const EditorState& State() const noexcept { return state; }
 

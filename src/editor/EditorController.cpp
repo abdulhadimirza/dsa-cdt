@@ -18,17 +18,53 @@ std::optional<VertexId> EditorController::PickVertex(
 }
 
 void EditorController::ClearInteraction() noexcept {
-    state = {};
+    state.hovered_vertex.reset();
+    state.dragged_vertex.reset();
+    state.drag_offset = {};
+    state.edge_chain.clear();
+}
+
+void EditorController::SetTool(EditorTool tool) noexcept {
+    if (state.active_tool == tool) return;
+    state.active_tool = tool;
+    ClearInteraction();
 }
 
 void EditorController::Update(const EditorInput& input, GeometryModel& model) {
+    if (input.escape_pressed && state.active_tool != EditorTool::AddMove) {
+        state.edge_chain.clear();
+    }
     if (!input.editing_allowed) {
-        ClearInteraction();
+        state.hovered_vertex.reset();
+        state.dragged_vertex.reset();
+        state.drag_offset = {};
         return;
     }
 
     if (state.dragged_vertex && !model.FindVertex(*state.dragged_vertex)) {
         state.dragged_vertex.reset();
+    }
+
+    if (state.active_tool != EditorTool::AddMove) {
+        state.hovered_vertex = PickVertex(model, input.cursor_world, input.pick_radius_world);
+        if (input.escape_pressed) return;
+        if (input.left_pressed && state.hovered_vertex) {
+            const VertexId selected = *state.hovered_vertex;
+            if (state.edge_chain.empty()) {
+                state.edge_chain.push_back(selected);
+            } else if (selected == state.edge_chain.front()) {
+                if (state.edge_chain.size() >= 3) {
+                    const EdgeType type = state.active_tool == EditorTool::Border
+                        ? EdgeType::Border : EdgeType::Obstacle;
+                    if (model.AddEdge(state.edge_chain.back(), selected, type)) state.edge_chain.clear();
+                }
+            } else if (selected != state.edge_chain.back()) {
+                const EdgeType type = state.active_tool == EditorTool::Border
+                    ? EdgeType::Border : EdgeType::Obstacle;
+                if (model.AddEdge(state.edge_chain.back(), selected, type)) state.edge_chain.push_back(selected);
+            }
+        }
+        return;
     }
 
     if (state.dragged_vertex) {

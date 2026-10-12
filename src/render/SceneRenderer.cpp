@@ -15,6 +15,10 @@ constexpr Color point_outer_color{15, 18, 24, 255};
 constexpr Color point_inner_color{80, 200, 240, 255};
 constexpr Color point_hover_color{255, 235, 80, 255};
 constexpr Color point_drag_color{255, 120, 90, 255};
+constexpr Color border_edge_color{255, 190, 70, 255};
+constexpr Color obstacle_edge_color{220, 100, 180, 255};
+constexpr Color invalid_loop_color{245, 80, 85, 255};
+constexpr Color edge_preview_color{220, 235, 245, 170};
 
 Vector2 ToRaylib(Vector2d position) {
     return Vector2{static_cast<float>(position.x), static_cast<float>(position.y)};
@@ -23,6 +27,41 @@ Vector2 ToRaylib(Vector2d position) {
 } // namespace
 
 void SceneRenderer::DrawWorld(const GeometryModel& model, const EditorState& editor) const {
+    const auto is_loop_edge = [&model](const GeometryEdge& edge) {
+        for (const GeometryLoop& loop : model.Loops()) {
+            if (loop.type != edge.type) continue;
+            for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
+                const VertexId a = loop.vertices[i];
+                const VertexId b = loop.vertices[(i + 1) % loop.vertices.size()];
+                if ((a == edge.first && b == edge.second) || (a == edge.second && b == edge.first)) return true;
+            }
+        }
+        return false;
+    };
+    for (const GeometryEdge& edge : model.Edges()) {
+        if (is_loop_edge(edge)) continue;
+        const Vertex* first = model.FindVertex(edge.first);
+        const Vertex* second = model.FindVertex(edge.second);
+        if (first && second) DrawLineEx(ToRaylib(first->position), ToRaylib(second->position), 3.0f,
+            edge.type == EdgeType::Border ? border_edge_color : obstacle_edge_color);
+    }
+    for (const GeometryLoop& loop : model.Loops()) {
+        const Color color = !loop.valid ? invalid_loop_color :
+            (loop.type == EdgeType::Border ? border_edge_color : obstacle_edge_color);
+        for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
+            const Vertex* first = model.FindVertex(loop.vertices[i]);
+            const Vertex* second = model.FindVertex(loop.vertices[(i + 1) % loop.vertices.size()]);
+            if (first && second) DrawLineEx(ToRaylib(first->position), ToRaylib(second->position), 3.5f, color);
+        }
+    }
+    if (!editor.edge_chain.empty()) {
+        const Vertex* from = model.FindVertex(editor.edge_chain.back());
+        if (from && editor.hovered_vertex) {
+            const Vertex* to = model.FindVertex(*editor.hovered_vertex);
+            if (to && to->id != from->id)
+                DrawLineEx(ToRaylib(from->position), ToRaylib(to->position), 2.0f, edge_preview_color);
+        }
+    }
     for (const Vertex& vertex : model.Vertices()) {
         Color color = point_inner_color;
         if (editor.dragged_vertex == vertex.id) color = point_drag_color;
@@ -56,7 +95,7 @@ void SceneRenderer::DrawOverlays(const GeometryModel& model, const RenderOptions
     }
 
     DrawRectangle(0, GetScreenHeight() - 30, GetScreenWidth(), 30, Color{15, 18, 24, 230});
-    DrawText("Space + Left Drag: Pan Canvas | Scroll: Zoom to Mouse | Left-click: Add Point | Left Drag: Move Point | Right-click: Delete Point",
+    DrawText("Space + Left Drag: Pan | Scroll: Zoom | Add/Move: click blank to add, drag to move, right-click to delete | Edge tools: click vertices, Esc cancels",
         16, GetScreenHeight() - 22, 14, Color{175, 190, 205, 230});
 }
 

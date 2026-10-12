@@ -9,8 +9,6 @@
 #include "ui/ControlPanel.hpp"
 
 #include <algorithm>
-#include <array>
-#include <vector>
 
 namespace {
 
@@ -18,23 +16,17 @@ constexpr int screen_width = 1280;
 constexpr int screen_height = 800;
 constexpr Color background_color{22, 25, 32, 255};
 
-constexpr std::array<cdt::Vector2d, 10> default_vertices{{
-    {-380.0, -180.0}, {-180.0, -240.0}, {80.0, -220.0}, {320.0, -150.0},
-    {420.0, 80.0}, {220.0, 240.0}, {-100.0, 220.0}, {-330.0, 120.0},
-    {-150.0, -30.0}, {90.0, 10.0}
-}};
-
 } // namespace
 
 int main() {
     SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     InitWindow(screen_width, screen_height, "DCDT Simulation - Infinite Canvas");
+    SetExitKey(KEY_NULL);
     SetTargetFPS(60);
     rlImGuiSetup(true);
 
     cdt::CameraController camera(Vector2{0.0f, 0.0f});
     cdt::GeometryModel geometry;
-    geometry.ResetVertices(std::vector<cdt::Vector2d>(default_vertices.begin(), default_vertices.end()));
     cdt::EditorController editor;
     cdt::SceneRenderer renderer;
     cdt::ControlPanel control_panel;
@@ -54,6 +46,7 @@ int main() {
         editor_input.left_down = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
         editor_input.left_released = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
         editor_input.right_pressed = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
+        editor_input.escape_pressed = IsKeyPressed(KEY_ESCAPE);
         editor.Update(editor_input, geometry);
 
         BeginDrawing();
@@ -70,20 +63,8 @@ int main() {
         rlImGuiEnd();
 
         if (requests.reset_view) camera.ResetView(Vector2{0.0f, 0.0f});
-        if (requests.reset_default_vertices) {
-            geometry.ResetVertices(std::vector<cdt::Vector2d>(default_vertices.begin(), default_vertices.end()));
-            editor.ClearInteraction();
-        }
-        if (requests.generate_random_vertices) {
-            geometry.Clear();
-            editor.ClearInteraction();
-            for (int i = 0; i < 15; ++i) {
-                const double x = static_cast<double>(GetRandomValue(-450, 450));
-                const double y = static_cast<double>(GetRandomValue(-300, 300));
-                (void)geometry.AddVertex(cdt::Vector2d{x, y});
-            }
-        }
-        if (requests.clear_vertices) {
+        if (requests.selected_tool) editor.SetTool(*requests.selected_tool);
+        if (requests.clear_geometry) {
             geometry.Clear();
             editor.ClearInteraction();
         }
