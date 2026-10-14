@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -61,69 +60,30 @@ bool GeometryModel::MoveVerticesBy(const std::vector<VertexId>& ids, Vector2d of
     return moved;
 }
 
-std::vector<VertexId> GeometryModel::LoopGroupForVertex(VertexId id) const {
+std::vector<VertexId> GeometryModel::ChainForVertex(VertexId id) const {
     if (!FindVertex(id)) return {};
 
-    std::vector<std::vector<VertexId>> cyclic_components;
-    for (const EdgeType type : {EdgeType::Border, EdgeType::Obstacle}) {
-        std::unordered_map<VertexId, std::vector<VertexId>> adjacency;
-        for (const GeometryEdge& edge : edges) {
-            if (edge.type != type) continue;
-            adjacency[edge.first].push_back(edge.second);
-            adjacency[edge.second].push_back(edge.first);
-        }
-
-        std::unordered_map<VertexId, int> discovery;
-        std::unordered_map<VertexId, int> low;
-        std::vector<std::pair<VertexId, VertexId>> edge_stack;
-        int time = 0;
-        std::function<void(VertexId, VertexId)> visit = [&](VertexId current, VertexId parent) {
-            discovery[current] = low[current] = ++time;
-            for (const VertexId next : adjacency[current]) {
-                if (!discovery.contains(next)) {
-                    edge_stack.emplace_back(current, next);
-                    visit(next, current);
-                    low[current] = std::min(low[current], low[next]);
-                    if (low[next] >= discovery[current]) {
-                        std::unordered_set<VertexId> component;
-                        std::size_t component_edges = 0;
-                        while (!edge_stack.empty()) {
-                            const auto edge = edge_stack.back();
-                            edge_stack.pop_back();
-                            component.insert(edge.first);
-                            component.insert(edge.second);
-                            ++component_edges;
-                            if (edge.first == current && edge.second == next) break;
-                        }
-                        if (component_edges >= component.size())
-                            cyclic_components.emplace_back(component.begin(), component.end());
-                    }
-                } else if (next != parent && discovery[next] < discovery[current]) {
-                    edge_stack.emplace_back(current, next);
-                    low[current] = std::min(low[current], discovery[next]);
-                }
-            }
-        };
-
-        for (const auto& [vertex, neighbors] : adjacency) {
-            (void)neighbors;
-            if (!discovery.contains(vertex)) visit(vertex, vertex);
-        }
+    std::unordered_map<VertexId, std::vector<VertexId>> adjacency;
+    for (const GeometryEdge& edge : edges) {
+        adjacency[edge.first].push_back(edge.second);
+        adjacency[edge.second].push_back(edge.first);
     }
 
-    std::unordered_set<VertexId> group{id};
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (const auto& component : cyclic_components) {
-            const bool touches_group = std::any_of(component.begin(), component.end(),
-                [&group](VertexId vertex) { return group.contains(vertex); });
-            if (!touches_group) continue;
-            for (const VertexId vertex : component) changed = group.insert(vertex).second || changed;
+    const auto start = adjacency.find(id);
+    if (start == adjacency.end()) return {};
+
+    std::vector<VertexId> chain;
+    std::unordered_set<VertexId> visited{id};
+    std::vector<VertexId> pending{id};
+    while (!pending.empty()) {
+        const VertexId current = pending.back();
+        pending.pop_back();
+        chain.push_back(current);
+        for (const VertexId next : adjacency[current]) {
+            if (visited.insert(next).second) pending.push_back(next);
         }
     }
-    if (group.size() == 1) return {};
-    return {group.begin(), group.end()};
+    return chain;
 }
 
 bool GeometryModel::RemoveVertex(VertexId id) {

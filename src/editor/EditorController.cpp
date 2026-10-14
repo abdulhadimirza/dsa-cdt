@@ -21,7 +21,7 @@ void EditorController::ClearInteraction() noexcept {
     state.hovered_vertex.reset();
     state.dragged_vertex.reset();
     state.drag_offset = {};
-    state.loop_move_vertices.clear();
+    state.chain_move_vertices.clear();
     state.edge_chain.clear();
     state.status_message.clear();
 }
@@ -30,7 +30,7 @@ void EditorController::SetEditBehavior(EditBehavior behavior) noexcept {
     if (state.edit_behavior == behavior) return;
     state.edit_behavior = behavior;
     state.dragged_vertex.reset();
-    state.loop_move_vertices.clear();
+    state.chain_move_vertices.clear();
     state.status_message.clear();
 }
 
@@ -48,7 +48,7 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
         state.hovered_vertex.reset();
         state.dragged_vertex.reset();
         state.drag_offset = {};
-        state.loop_move_vertices.clear();
+        state.chain_move_vertices.clear();
         return;
     }
 
@@ -82,9 +82,9 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
     if (state.dragged_vertex) {
         state.hovered_vertex = state.dragged_vertex;
         if (input.left_down) {
-            if (state.edit_behavior == EditBehavior::MoveLoop) {
+            if (state.edit_behavior == EditBehavior::MoveChain) {
                 const Vector2d offset = input.cursor_world - state.last_drag_cursor;
-                (void)model.MoveVerticesBy(state.loop_move_vertices, offset);
+                (void)model.MoveVerticesBy(state.chain_move_vertices, offset);
                 state.last_drag_cursor = input.cursor_world;
             } else {
                 (void)model.MoveVertex(*state.dragged_vertex, input.cursor_world + state.drag_offset);
@@ -92,7 +92,7 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
         }
         if (input.left_released) {
             state.dragged_vertex.reset();
-            state.loop_move_vertices.clear();
+            state.chain_move_vertices.clear();
         }
     } else {
         state.hovered_vertex = PickVertex(model, input.cursor_world, input.pick_radius_world);
@@ -101,10 +101,10 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
                 const Vertex* vertex = model.FindVertex(*state.hovered_vertex);
                 state.drag_offset = vertex ? vertex->position - input.cursor_world : Vector2d{};
                 state.status_message.clear();
-                if (state.edit_behavior == EditBehavior::MoveLoop) {
-                    state.loop_move_vertices = model.LoopGroupForVertex(*state.hovered_vertex);
-                    if (state.loop_move_vertices.empty()) {
-                        state.status_message = "This point is not part of a closed loop.";
+                if (state.edit_behavior == EditBehavior::MoveChain) {
+                    state.chain_move_vertices = model.ChainForVertex(*state.hovered_vertex);
+                    if (state.chain_move_vertices.empty()) {
+                        state.status_message = "This point is not connected to an edge.";
                     } else {
                         state.dragged_vertex = state.hovered_vertex;
                         state.last_drag_cursor = input.cursor_world;

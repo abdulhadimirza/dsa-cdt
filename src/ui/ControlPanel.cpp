@@ -49,11 +49,11 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
             ImGui::Indent();
             if (ImGui::RadioButton("Move Vertex", editor.edit_behavior == EditBehavior::MoveVertex))
                 requests.selected_edit_behavior = EditBehavior::MoveVertex;
-            if (ImGui::RadioButton("Move Loop", editor.edit_behavior == EditBehavior::MoveLoop))
-                requests.selected_edit_behavior = EditBehavior::MoveLoop;
+            if (ImGui::RadioButton("Move Chain", editor.edit_behavior == EditBehavior::MoveChain))
+                requests.selected_edit_behavior = EditBehavior::MoveChain;
             ImGui::Unindent();
-            ImGui::TextDisabled(editor.edit_behavior == EditBehavior::MoveLoop
-                ? "Drag a loop point to move its connected loops." : "Drag a point to move it.");
+            ImGui::TextDisabled(editor.edit_behavior == EditBehavior::MoveChain
+                ? "Drag a point to move its connected edges." : "Drag a point to move it.");
         } else {
             const char* description = editor.active_tool == EditorTool::Border
                 ? "Click points in order to draw the map boundary."

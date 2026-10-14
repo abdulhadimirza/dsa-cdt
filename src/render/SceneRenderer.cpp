@@ -20,7 +20,7 @@ constexpr Color border_edge_color{255, 190, 70, 255};
 constexpr Color obstacle_edge_color{220, 100, 180, 255};
 constexpr Color invalid_loop_color{245, 80, 85, 255};
 constexpr Color edge_preview_color{220, 235, 245, 170};
-constexpr Color loop_move_color{90, 235, 185, 230};
+constexpr Color chain_move_color{90, 235, 185, 230};
 
 Vector2 ToRaylib(Vector2d position) {
     return Vector2{static_cast<float>(position.x), static_cast<float>(position.y)};
@@ -29,8 +29,8 @@ Vector2 ToRaylib(Vector2d position) {
 } // namespace
 
 void SceneRenderer::DrawWorld(const GeometryModel& model, const EditorState& editor) const {
-    const std::unordered_set<VertexId> moving_loop_vertices(
-        editor.loop_move_vertices.begin(), editor.loop_move_vertices.end());
+    const std::unordered_set<VertexId> moving_chain_vertices(
+        editor.chain_move_vertices.begin(), editor.chain_move_vertices.end());
     const auto is_loop_edge = [&model](const GeometryEdge& edge) {
         for (const GeometryLoop& loop : model.Loops()) {
             if (loop.type != edge.type) continue;
@@ -58,13 +58,13 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const EditorState& edi
             if (first && second) DrawLineEx(ToRaylib(first->position), ToRaylib(second->position), 3.5f, color);
         }
     }
-    if (editor.dragged_vertex && editor.edit_behavior == EditBehavior::MoveLoop) {
+    if (editor.dragged_vertex && editor.edit_behavior == EditBehavior::MoveChain) {
         for (const GeometryEdge& edge : model.Edges()) {
-            if (!moving_loop_vertices.contains(edge.first) || !moving_loop_vertices.contains(edge.second)) continue;
+            if (!moving_chain_vertices.contains(edge.first) || !moving_chain_vertices.contains(edge.second)) continue;
             const Vertex* first = model.FindVertex(edge.first);
             const Vertex* second = model.FindVertex(edge.second);
             if (first && second)
-                DrawLineEx(ToRaylib(first->position), ToRaylib(second->position), 5.0f, loop_move_color);
+                DrawLineEx(ToRaylib(first->position), ToRaylib(second->position), 5.0f, chain_move_color);
         }
     }
     if (!editor.edge_chain.empty()) {
@@ -77,8 +77,8 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const EditorState& edi
     }
     for (const Vertex& vertex : model.Vertices()) {
         Color color = point_inner_color;
-        if (moving_loop_vertices.contains(vertex.id) && editor.dragged_vertex &&
-            editor.edit_behavior == EditBehavior::MoveLoop) color = loop_move_color;
+        if (moving_chain_vertices.contains(vertex.id) && editor.dragged_vertex &&
+            editor.edit_behavior == EditBehavior::MoveChain) color = chain_move_color;
         else if (editor.dragged_vertex == vertex.id) color = point_drag_color;
         else if (editor.hovered_vertex == vertex.id) color = point_hover_color;
 
