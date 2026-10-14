@@ -20,6 +20,7 @@ class EditorController {
 public:
     void Update(const EditorInput& input, GeometryModel& model);
     void SetTool(EditorTool tool) noexcept;
+    void SetEditBehavior(EditBehavior behavior) noexcept;
     void ClearInteraction() noexcept;
     [[nodiscard]] const EditorState& State() const noexcept { return state; }
 

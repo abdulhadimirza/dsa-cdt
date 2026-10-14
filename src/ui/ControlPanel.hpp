@@ -15,6 +15,7 @@ struct ControlRequests {
     bool reset_view{false};
     bool clear_geometry{false};
     std::optional<EditorTool> selected_tool;
+    std::optional<EditBehavior> selected_edit_behavior;
 };
 
 class ControlPanel {

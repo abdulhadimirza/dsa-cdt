@@ -34,6 +34,8 @@ class GeometryModel {
 public:
     [[nodiscard]] VertexId AddVertex(Vector2d position);
     [[nodiscard]] bool MoveVertex(VertexId id, Vector2d position);
+    [[nodiscard]] bool MoveVerticesBy(const std::vector<VertexId>& ids, Vector2d offset);
+    [[nodiscard]] std::vector<VertexId> LoopGroupForVertex(VertexId id) const;
     [[nodiscard]] bool RemoveVertex(VertexId id);
     [[nodiscard]] bool AddEdge(VertexId first, VertexId second, EdgeType type);
     void Clear() noexcept;

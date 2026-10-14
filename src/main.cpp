@@ -56,7 +56,7 @@ int main() {
         renderer.DrawWorld(geometry, editor.State());
         EndMode2D();
 
-        renderer.DrawOverlays(geometry, control_panel.Options(), camera.GetCamera());
+        renderer.DrawOverlays(geometry, control_panel.Options(), camera.GetCamera(), editor.State());
         rlImGuiBegin();
         const cdt::ControlRequests requests = control_panel.Draw(
             camera.GetCamera(), mouse_screen, mouse_world, geometry, editor.State());
@@ -64,6 +64,7 @@ int main() {
 
         if (requests.reset_view) camera.ResetView(Vector2{0.0f, 0.0f});
         if (requests.selected_tool) editor.SetTool(*requests.selected_tool);
+        if (requests.selected_edit_behavior) editor.SetEditBehavior(*requests.selected_edit_behavior);
         if (requests.clear_geometry) {
             geometry.Clear();
             editor.ClearInteraction();

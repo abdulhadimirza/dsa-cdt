@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <string>
+#include <unordered_set>
 
 namespace cdt {
 namespace {
@@ -19,6 +20,7 @@ constexpr Color border_edge_color{255, 190, 70, 255};
 constexpr Color obstacle_edge_color{220, 100, 180, 255};
 constexpr Color invalid_loop_color{245, 80, 85, 255};
 constexpr Color edge_preview_color{220, 235, 245, 170};
+constexpr Color loop_move_color{90, 235, 185, 230};
 
 Vector2 ToRaylib(Vector2d position) {
     return Vector2{static_cast<float>(position.x), static_cast<float>(position.y)};
@@ -27,6 +29,8 @@ Vector2 ToRaylib(Vector2d position) {
 } // namespace
 
 void SceneRenderer::DrawWorld(const GeometryModel& model, const EditorState& editor) const {
+    const std::unordered_set<VertexId> moving_loop_vertices(
+        editor.loop_move_vertices.begin(), editor.loop_move_vertices.end());
     const auto is_loop_edge = [&model](const GeometryEdge& edge) {
         for (const GeometryLoop& loop : model.Loops()) {
             if (loop.type != edge.type) continue;
@@ -54,6 +58,15 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const EditorState& edi
             if (first && second) DrawLineEx(ToRaylib(first->position), ToRaylib(second->position), 3.5f, color);
         }
     }
+    if (editor.dragged_vertex && editor.edit_behavior == EditBehavior::MoveLoop) {
+        for (const GeometryEdge& edge : model.Edges()) {
+            if (!moving_loop_vertices.contains(edge.first) || !moving_loop_vertices.contains(edge.second)) continue;
+            const Vertex* first = model.FindVertex(edge.first);
+            const Vertex* second = model.FindVertex(edge.second);
+            if (first && second)
+                DrawLineEx(ToRaylib(first->position), ToRaylib(second->position), 5.0f, loop_move_color);
+        }
+    }
     if (!editor.edge_chain.empty()) {
         const Vertex* from = model.FindVertex(editor.edge_chain.back());
         if (from && editor.hovered_vertex) {
@@ -64,7 +77,9 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const EditorState& edi
     }
     for (const Vertex& vertex : model.Vertices()) {
         Color color = point_inner_color;
-        if (editor.dragged_vertex == vertex.id) color = point_drag_color;
+        if (moving_loop_vertices.contains(vertex.id) && editor.dragged_vertex &&
+            editor.edit_behavior == EditBehavior::MoveLoop) color = loop_move_color;
+        else if (editor.dragged_vertex == vertex.id) color = point_drag_color;
         else if (editor.hovered_vertex == vertex.id) color = point_hover_color;
 
         const Vector2 position = ToRaylib(vertex.position);
@@ -74,7 +89,7 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const EditorState& edi
 }
 
 void SceneRenderer::DrawOverlays(const GeometryModel& model, const RenderOptions& options,
-    const Camera2D& camera) const {
+    const Camera2D& camera, const EditorState& editor) const {
     if (options.show_vertex_ids || options.show_coordinates) {
         for (const Vertex& vertex : model.Vertices()) {
             const Vector2 screen = GetWorldToScreen2D(ToRaylib(vertex.position), camera);
@@ -95,8 +110,11 @@ void SceneRenderer::DrawOverlays(const GeometryModel& model, const RenderOptions
     }
 
     DrawRectangle(0, GetScreenHeight() - 30, GetScreenWidth(), 30, Color{15, 18, 24, 230});
-    DrawText("Space + Left Drag: Pan | Scroll: Zoom | Add/Move: click blank to add, drag to move, right-click to delete | Edge tools: click vertices, Esc cancels",
+    DrawText("Space + Left Drag: Pan | Scroll: Zoom | Edit: add / move / delete points | Border and Obstacle: click points in order; Esc cancels",
         16, GetScreenHeight() - 22, 14, Color{175, 190, 205, 230});
+    if (!editor.status_message.empty()) {
+        DrawText(editor.status_message.c_str(), 16, GetScreenHeight() - 54, 16, Color{255, 190, 90, 255});
+    }
 }
 
 } // namespace cdt

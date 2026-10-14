@@ -9,7 +9,7 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
     ControlRequests requests{};
 
     ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(300.0f, 420.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(320.0f, 500.0f), ImGuiCond_FirstUseEver);
 
     if (ImGui::Begin("Canvas & Points Controls")) {
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Camera & World Space");
@@ -38,13 +38,34 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
         ImGui::Checkbox("Show Point IDs", &options.show_vertex_ids);
         ImGui::Checkbox("Show Coordinates", &options.show_coordinates);
         ImGui::Separator();
-        if (ImGui::RadioButton("Add / Move", editor.active_tool == EditorTool::AddMove))
-            requests.selected_tool = EditorTool::AddMove;
+        if (ImGui::RadioButton("Edit", editor.active_tool == EditorTool::Edit))
+            requests.selected_tool = EditorTool::Edit;
         if (ImGui::RadioButton("Draw Border", editor.active_tool == EditorTool::Border))
             requests.selected_tool = EditorTool::Border;
         if (ImGui::RadioButton("Draw Obstacle", editor.active_tool == EditorTool::Obstacle))
             requests.selected_tool = EditorTool::Obstacle;
-        ImGui::TextDisabled("Click vertices in sequence; click the first again to close. Esc cancels.");
+        if (editor.active_tool == EditorTool::Edit) {
+            ImGui::TextDisabled("Click empty space to add; right-click a point to delete.");
+            ImGui::Indent();
+            if (ImGui::RadioButton("Move Vertex", editor.edit_behavior == EditBehavior::MoveVertex))
+                requests.selected_edit_behavior = EditBehavior::MoveVertex;
+            if (ImGui::RadioButton("Move Loop", editor.edit_behavior == EditBehavior::MoveLoop))
+                requests.selected_edit_behavior = EditBehavior::MoveLoop;
+            ImGui::Unindent();
+            ImGui::TextDisabled(editor.edit_behavior == EditBehavior::MoveLoop
+                ? "Drag a loop point to move its connected loops." : "Drag a point to move it.");
+        } else {
+            const char* description = editor.active_tool == EditorTool::Border
+                ? "Click points in order to draw the map boundary."
+                : "Click points in order to draw an obstacle.";
+            ImGui::TextDisabled("%s", description);
+            ImGui::TextDisabled("Click the first point to close; Esc cancels.");
+            if (!editor.edge_chain.empty())
+                ImGui::Text("Drawing: %zu points", editor.edge_chain.size());
+        }
+        if (!editor.status_message.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "%s", editor.status_message.c_str());
+        }
         requests.clear_geometry = ImGui::Button("Clear Geometry", ImVec2(-1.0f, 24.0f));
     }
     ImGui::End();

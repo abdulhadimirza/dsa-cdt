@@ -2,6 +2,8 @@
 # Raylib + ImGui + rlImGui Gitignore Template
 # ==============================================================================
 
+.codegraph/
+
 # --- Compiled Binaries & Libraries ---
 *.exe
 *.dll

@@ -21,7 +21,17 @@ void EditorController::ClearInteraction() noexcept {
     state.hovered_vertex.reset();
     state.dragged_vertex.reset();
     state.drag_offset = {};
+    state.loop_move_vertices.clear();
     state.edge_chain.clear();
+    state.status_message.clear();
+}
+
+void EditorController::SetEditBehavior(EditBehavior behavior) noexcept {
+    if (state.edit_behavior == behavior) return;
+    state.edit_behavior = behavior;
+    state.dragged_vertex.reset();
+    state.loop_move_vertices.clear();
+    state.status_message.clear();
 }
 
 void EditorController::SetTool(EditorTool tool) noexcept {
@@ -31,13 +41,14 @@ void EditorController::SetTool(EditorTool tool) noexcept {
 }
 
 void EditorController::Update(const EditorInput& input, GeometryModel& model) {
-    if (input.escape_pressed && state.active_tool != EditorTool::AddMove) {
+    if (input.escape_pressed && state.active_tool != EditorTool::Edit) {
         state.edge_chain.clear();
     }
     if (!input.editing_allowed) {
         state.hovered_vertex.reset();
         state.dragged_vertex.reset();
         state.drag_offset = {};
+        state.loop_move_vertices.clear();
         return;
     }
 
@@ -45,7 +56,7 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
         state.dragged_vertex.reset();
     }
 
-    if (state.active_tool != EditorTool::AddMove) {
+    if (state.active_tool != EditorTool::Edit) {
         state.hovered_vertex = PickVertex(model, input.cursor_world, input.pick_radius_world);
         if (input.escape_pressed) return;
         if (input.left_pressed && state.hovered_vertex) {
@@ -67,28 +78,50 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
         return;
     }
 
+    if (input.escape_pressed) state.status_message.clear();
     if (state.dragged_vertex) {
         state.hovered_vertex = state.dragged_vertex;
         if (input.left_down) {
-            model.MoveVertex(*state.dragged_vertex, input.cursor_world + state.drag_offset);
+            if (state.edit_behavior == EditBehavior::MoveLoop) {
+                const Vector2d offset = input.cursor_world - state.last_drag_cursor;
+                (void)model.MoveVerticesBy(state.loop_move_vertices, offset);
+                state.last_drag_cursor = input.cursor_world;
+            } else {
+                (void)model.MoveVertex(*state.dragged_vertex, input.cursor_world + state.drag_offset);
+            }
         }
-        if (input.left_released) state.dragged_vertex.reset();
+        if (input.left_released) {
+            state.dragged_vertex.reset();
+            state.loop_move_vertices.clear();
+        }
     } else {
         state.hovered_vertex = PickVertex(model, input.cursor_world, input.pick_radius_world);
         if (input.left_pressed) {
             if (state.hovered_vertex) {
-                state.dragged_vertex = state.hovered_vertex;
                 const Vertex* vertex = model.FindVertex(*state.hovered_vertex);
                 state.drag_offset = vertex ? vertex->position - input.cursor_world : Vector2d{};
+                state.status_message.clear();
+                if (state.edit_behavior == EditBehavior::MoveLoop) {
+                    state.loop_move_vertices = model.LoopGroupForVertex(*state.hovered_vertex);
+                    if (state.loop_move_vertices.empty()) {
+                        state.status_message = "This point is not part of a closed loop.";
+                    } else {
+                        state.dragged_vertex = state.hovered_vertex;
+                        state.last_drag_cursor = input.cursor_world;
+                    }
+                } else {
+                    state.dragged_vertex = state.hovered_vertex;
+                }
             } else {
                 (void)model.AddVertex(input.cursor_world);
+                state.status_message.clear();
             }
         }
     }
 
     if (input.right_pressed) {
         const auto target = state.dragged_vertex ? state.dragged_vertex : state.hovered_vertex;
-        if (target) model.RemoveVertex(*target);
+        if (target) (void)model.RemoveVertex(*target);
         ClearInteraction();
     }
 }
