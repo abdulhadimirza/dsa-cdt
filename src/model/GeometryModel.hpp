@@ -4,7 +4,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <vector>
 
 namespace cdt {
@@ -22,7 +21,7 @@ struct GeometryEdge {
 struct GeometryLoop {
     EdgeType type{EdgeType::Border};
     std::vector<VertexId> vertices;
-    bool valid{true};
+    std::uint64_t completion_order{};
 };
 
 struct Vertex {
@@ -52,6 +51,7 @@ private:
     std::vector<GeometryEdge> edges;
     std::vector<GeometryLoop> loops;
     VertexId next_id{0};
+    std::uint64_t next_loop_completion_order{0};
 };
 
 } // namespace cdt

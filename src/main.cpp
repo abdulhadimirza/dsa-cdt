@@ -6,6 +6,7 @@
 #include "editor/EditorController.hpp"
 #include "model/GeometryModel.hpp"
 #include "render/SceneRenderer.hpp"
+#include "validation/GeometryValidator.hpp"
 #include "ui/ControlPanel.hpp"
 
 #include <algorithm>
@@ -29,6 +30,7 @@ int main() {
     cdt::GeometryModel geometry;
     cdt::EditorController editor;
     cdt::SceneRenderer renderer;
+    cdt::GeometryValidator validator;
     cdt::ControlPanel control_panel;
 
     while (!WindowShouldClose()) {
@@ -48,12 +50,13 @@ int main() {
         editor_input.right_pressed = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
         editor_input.escape_pressed = IsKeyPressed(KEY_ESCAPE);
         editor.Update(editor_input, geometry);
+        const cdt::GeometryValidation validation = validator.Validate(geometry);
 
         BeginDrawing();
         ClearBackground(background_color);
         BeginMode2D(camera.GetCamera());
         camera.DrawWorldGrid();
-        renderer.DrawWorld(geometry, editor.State());
+        renderer.DrawWorld(geometry, validation, editor.State());
         EndMode2D();
 
         renderer.DrawOverlays(geometry, control_panel.Options(), camera.GetCamera(), editor.State());

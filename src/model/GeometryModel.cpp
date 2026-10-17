@@ -1,37 +1,12 @@
 #include "model/GeometryModel.hpp"
 
 #include <algorithm>
-#include <cmath>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 namespace cdt {
-namespace {
-
-double Cross(Vector2d a, Vector2d b, Vector2d c) {
-    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-}
-
-bool OnSegment(Vector2d a, Vector2d b, Vector2d point) {
-    constexpr double epsilon = 1e-9;
-    return std::abs(Cross(a, b, point)) <= epsilon &&
-        point.x >= std::min(a.x, b.x) - epsilon && point.x <= std::max(a.x, b.x) + epsilon &&
-        point.y >= std::min(a.y, b.y) - epsilon && point.y <= std::max(a.y, b.y) + epsilon;
-}
-
-bool SegmentsIntersect(Vector2d a, Vector2d b, Vector2d c, Vector2d d) {
-    constexpr double epsilon = 1e-9;
-    const double ab_c = Cross(a, b, c);
-    const double ab_d = Cross(a, b, d);
-    const double cd_a = Cross(c, d, a);
-    const double cd_b = Cross(c, d, b);
-    if (((ab_c > epsilon && ab_d < -epsilon) || (ab_c < -epsilon && ab_d > epsilon)) &&
-        ((cd_a > epsilon && cd_b < -epsilon) || (cd_a < -epsilon && cd_b > epsilon))) return true;
-    return OnSegment(a, b, c) || OnSegment(a, b, d) || OnSegment(c, d, a) || OnSegment(c, d, b);
-}
-
-} // namespace
 
 VertexId GeometryModel::AddVertex(Vector2d position) {
     const VertexId id = next_id++;
@@ -115,6 +90,7 @@ void GeometryModel::Clear() noexcept {
     vertices.clear();
     edges.clear();
     loops.clear();
+    next_loop_completion_order = 0;
 }
 
 const Vertex* GeometryModel::FindVertex(VertexId id) const noexcept {
@@ -125,6 +101,14 @@ const Vertex* GeometryModel::FindVertex(VertexId id) const noexcept {
 }
 
 void GeometryModel::RebuildLoops() {
+    std::unordered_map<std::string, std::uint64_t> previous_orders;
+    for (const GeometryLoop& loop : loops) {
+        std::vector<VertexId> key_vertices = loop.vertices;
+        std::sort(key_vertices.begin(), key_vertices.end());
+        std::string key = std::to_string(static_cast<int>(loop.type)) + ":";
+        for (const VertexId id : key_vertices) key += std::to_string(id) + ",";
+        previous_orders.emplace(std::move(key), loop.completion_order);
+    }
     loops.clear();
     for (const EdgeType type : {EdgeType::Border, EdgeType::Obstacle}) {
         std::unordered_map<VertexId, std::vector<VertexId>> adjacency;
@@ -166,32 +150,26 @@ void GeometryModel::RebuildLoops() {
             if (current != start || ordered.size() != component.size()) continue;
 
             double twice_area = 0.0;
-            bool valid = true;
             for (std::size_t i = 0; i < ordered.size(); ++i) {
                 const Vertex* a = FindVertex(ordered[i]);
                 const Vertex* b = FindVertex(ordered[(i + 1) % ordered.size()]);
-                if (!a || !b) { valid = false; break; }
-                twice_area += a->position.x * b->position.y - b->position.x * a->position.y;
+                if (a && b) twice_area += a->position.x * b->position.y - b->position.x * a->position.y;
             }
-            if (std::abs(twice_area) < 1e-9) valid = false;
             if (twice_area < 0.0) std::reverse(ordered.begin(), ordered.end());
 
-            for (std::size_t i = 0; valid && i < ordered.size(); ++i) {
-                const Vertex* a = FindVertex(ordered[i]);
-                const Vertex* b = FindVertex(ordered[(i + 1) % ordered.size()]);
-                for (std::size_t j = i + 1; j < ordered.size(); ++j) {
-                    if (j == i || j == (i + 1) % ordered.size() || i == (j + 1) % ordered.size()) continue;
-                    const Vertex* c = FindVertex(ordered[j]);
-                    const Vertex* d = FindVertex(ordered[(j + 1) % ordered.size()]);
-                    if (a && b && c && d && SegmentsIntersect(a->position, b->position, c->position, d->position)) {
-                        valid = false;
-                        break;
-                    }
-                }
-            }
-            loops.push_back(GeometryLoop{type, std::move(ordered), valid});
+            std::vector<VertexId> key_vertices = ordered;
+            std::sort(key_vertices.begin(), key_vertices.end());
+            std::string key = std::to_string(static_cast<int>(type)) + ":";
+            for (const VertexId id : key_vertices) key += std::to_string(id) + ",";
+            const auto prior = previous_orders.find(key);
+            const std::uint64_t completion_order = prior == previous_orders.end()
+                ? next_loop_completion_order++ : prior->second;
+            loops.push_back(GeometryLoop{type, std::move(ordered), completion_order});
         }
     }
+    std::sort(loops.begin(), loops.end(), [](const GeometryLoop& a, const GeometryLoop& b) {
+        return a.completion_order < b.completion_order;
+    });
 }
 
 } // namespace cdt

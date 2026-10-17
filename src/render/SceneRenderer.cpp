@@ -18,6 +18,8 @@ constexpr Color point_hover_color{255, 235, 80, 255};
 constexpr Color point_drag_color{255, 120, 90, 255};
 constexpr Color border_edge_color{255, 190, 70, 255};
 constexpr Color obstacle_edge_color{220, 100, 180, 255};
+constexpr Color inactive_border_color{125, 135, 150, 255};
+constexpr Color inactive_obstacle_color{245, 80, 85, 255};
 constexpr Color invalid_loop_color{245, 80, 85, 255};
 constexpr Color edge_preview_color{220, 235, 245, 170};
 constexpr Color chain_move_color{90, 235, 185, 230};
@@ -28,7 +30,8 @@ Vector2 ToRaylib(Vector2d position) {
 
 } // namespace
 
-void SceneRenderer::DrawWorld(const GeometryModel& model, const EditorState& editor) const {
+void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidation& validation,
+    const EditorState& editor) const {
     const std::unordered_set<VertexId> moving_chain_vertices(
         editor.chain_move_vertices.begin(), editor.chain_move_vertices.end());
     const auto is_loop_edge = [&model](const GeometryEdge& edge) {
@@ -49,9 +52,15 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const EditorState& edi
         if (first && second) DrawLineEx(ToRaylib(first->position), ToRaylib(second->position), 3.0f,
             edge.type == EdgeType::Border ? border_edge_color : obstacle_edge_color);
     }
-    for (const GeometryLoop& loop : model.Loops()) {
-        const Color color = !loop.valid ? invalid_loop_color :
-            (loop.type == EdgeType::Border ? border_edge_color : obstacle_edge_color);
+    for (std::size_t loop_index = 0; loop_index < model.Loops().size(); ++loop_index) {
+        const GeometryLoop& loop = model.Loops()[loop_index];
+        const LoopValidation* state = loop_index < validation.loops.size() ? &validation.loops[loop_index] : nullptr;
+        Color color = invalid_loop_color;
+        if (state && state->individually_valid) {
+            if (loop.type == EdgeType::Border) color = state && state->active_border
+                ? border_edge_color : inactive_border_color;
+            else color = state && state->eligible ? obstacle_edge_color : inactive_obstacle_color;
+        }
         for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
             const Vertex* first = model.FindVertex(loop.vertices[i]);
             const Vertex* second = model.FindVertex(loop.vertices[(i + 1) % loop.vertices.size()]);

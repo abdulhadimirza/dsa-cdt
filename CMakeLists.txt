@@ -42,6 +42,7 @@ add_executable(${PROJECT_NAME}
     src/main.cpp
     src/app/CameraController.cpp
     src/model/GeometryModel.cpp
+    src/validation/GeometryValidator.cpp
     src/editor/EditorController.cpp
     src/render/SceneRenderer.cpp
     src/ui/ControlPanel.cpp
@@ -62,6 +63,17 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 # 2. FIX: Link using the actual case-sensitive target names
 # Note the capital 'I' and 'G' in rlImGui!
 target_link_libraries(${PROJECT_NAME} PRIVATE raylib)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(GeometryValidationTests
+        tests/GeometryValidationTests.cpp
+        src/model/GeometryModel.cpp
+        src/validation/GeometryValidator.cpp
+    )
+    target_include_directories(GeometryValidationTests PRIVATE src)
+    add_test(NAME GeometryValidationTests COMMAND GeometryValidationTests)
+endif()
 
 
 # Setup runtime copy rules if you have assets (Images, Fonts, etc.)
