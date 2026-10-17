@@ -8,12 +8,73 @@
 
 namespace cdt {
 
+namespace {
+
+using Adjacency = std::unordered_map<VertexId, std::vector<VertexId>>;
+
+// Builds an undirected adjacency list containing only edges of the requested type.
+Adjacency BuildAdjacency(const std::vector<GeometryEdge>& edges, EdgeType type) {
+    Adjacency adjacency;
+    for (const GeometryEdge& edge : edges) {
+        if (edge.type != type) continue;
+        // Store each undirected edge in both directions for graph traversal.
+        adjacency[edge.first].push_back(edge.second);
+        adjacency[edge.second].push_back(edge.first);
+    }
+    return adjacency;
+}
+
+// Orders a degree-two connected component into a closed cycle starting at start.
+bool OrderCycle(VertexId start, const Adjacency& adjacency,
+    const std::vector<VertexId>& component, std::vector<VertexId>& ordered) {
+    ordered.clear();
+    ordered.reserve(component.size());
+    VertexId previous{};
+    bool has_previous = false;
+    VertexId current = start;
+    do {
+        ordered.push_back(current);
+        const auto& adjacent = adjacency.at(current);
+        // At each degree-two vertex, continue along the edge not just traversed.
+        const VertexId next = has_previous && adjacent[0] == previous ? adjacent[1] : adjacent[0];
+        previous = current;
+        has_previous = true;
+        current = next;
+    } while (current != start && ordered.size() <= component.size());
+    return current == start && ordered.size() == component.size();
+}
+
+// Calculates twice the signed polygon area for the ordered vertex IDs.
+double SignedTwiceArea(const std::vector<VertexId>& ordered,
+    const std::unordered_map<VertexId, Vector2d>& positions) {
+    double twice_area = 0.0;
+    for (std::size_t i = 0; i < ordered.size(); ++i) {
+        const Vector2d& a = positions.at(ordered[i]);
+        const Vector2d& b = positions.at(ordered[(i + 1) % ordered.size()]);
+        twice_area += a.x * b.y - b.x * a.y;
+    }
+    return twice_area;
+}
+
+// Creates a stable key from the edge type and the unordered set of loop vertices.
+std::string LoopKey(EdgeType type, const std::vector<VertexId>& vertices) {
+    std::vector<VertexId> sorted_vertices = vertices;
+    std::sort(sorted_vertices.begin(), sorted_vertices.end());
+    std::string key = std::to_string(static_cast<int>(type)) + ":";
+    for (const VertexId id : sorted_vertices) key += std::to_string(id) + ",";
+    return key;
+}
+
+} // namespace
+
+// Adds a vertex and returns its newly assigned ID.
 VertexId GeometryModel::AddVertex(Vector2d position) {
     const VertexId id = next_id++;
     vertices.push_back(Vertex{id, position});
     return id;
 }
 
+// Moves a vertex, rebuilding derived loops when the vertex exists.
 bool GeometryModel::MoveVertex(VertexId id, Vector2d position) {
     const auto it = std::find_if(vertices.begin(), vertices.end(), [id](const Vertex& vertex) {
         return vertex.id == id;
@@ -24,6 +85,7 @@ bool GeometryModel::MoveVertex(VertexId id, Vector2d position) {
     return true;
 }
 
+// Moves each requested vertex by an offset and rebuilds loops if anything moved.
 bool GeometryModel::MoveVerticesBy(const std::vector<VertexId>& ids, Vector2d offset) {
     bool moved = false;
     for (Vertex& vertex : vertices) {
@@ -35,6 +97,7 @@ bool GeometryModel::MoveVerticesBy(const std::vector<VertexId>& ids, Vector2d of
     return moved;
 }
 
+// Returns every vertex connected to the given vertex, or an empty list if it has no chain.
 std::vector<VertexId> GeometryModel::ChainForVertex(VertexId id) const {
     if (!FindVertex(id)) return {};
 
@@ -61,6 +124,7 @@ std::vector<VertexId> GeometryModel::ChainForVertex(VertexId id) const {
     return chain;
 }
 
+// Removes a vertex and its incident edges, then rebuilds derived loops.
 bool GeometryModel::RemoveVertex(VertexId id) {
     const auto it = std::find_if(vertices.begin(), vertices.end(), [id](const Vertex& vertex) {
         return vertex.id == id;
@@ -74,6 +138,7 @@ bool GeometryModel::RemoveVertex(VertexId id) {
     return true;
 }
 
+// Adds an edge if its endpoints are valid and the undirected edge is not already present.
 bool GeometryModel::AddEdge(VertexId first, VertexId second, EdgeType type) {
     if (first == second || !FindVertex(first) || !FindVertex(second)) return false;
     const auto duplicate = std::find_if(edges.begin(), edges.end(), [=](const GeometryEdge& edge) {
@@ -86,6 +151,7 @@ bool GeometryModel::AddEdge(VertexId first, VertexId second, EdgeType type) {
     return true;
 }
 
+// Removes all geometry and resets loop completion ordering.
 void GeometryModel::Clear() noexcept {
     vertices.clear();
     edges.clear();
@@ -93,6 +159,7 @@ void GeometryModel::Clear() noexcept {
     next_loop_completion_order = 0;
 }
 
+// Finds a vertex by ID, returning nullptr when the ID is not present.
 const Vertex* GeometryModel::FindVertex(VertexId id) const noexcept {
     const auto it = std::find_if(vertices.begin(), vertices.end(), [id](const Vertex& vertex) {
         return vertex.id == id;
@@ -100,28 +167,30 @@ const Vertex* GeometryModel::FindVertex(VertexId id) const noexcept {
     return it == vertices.end() ? nullptr : &*it;
 }
 
+// Recomputes closed loops from edges while preserving completion order for existing loops.
 void GeometryModel::RebuildLoops() {
     std::unordered_map<std::string, std::uint64_t> previous_orders;
     for (const GeometryLoop& loop : loops) {
-        std::vector<VertexId> key_vertices = loop.vertices;
-        std::sort(key_vertices.begin(), key_vertices.end());
-        std::string key = std::to_string(static_cast<int>(loop.type)) + ":";
-        for (const VertexId id : key_vertices) key += std::to_string(id) + ",";
-        previous_orders.emplace(std::move(key), loop.completion_order);
+        // Keep completion identity when rebuilding the same loop after a geometry edit.
+        previous_orders.emplace(LoopKey(loop.type, loop.vertices), loop.completion_order);
     }
     loops.clear();
+    // Cache positions so area calculation can use direct lookups for valid edge endpoints.
+    const std::unordered_map<VertexId, Vector2d> positions = [&] {
+        std::unordered_map<VertexId, Vector2d> result;
+        result.reserve(vertices.size());
+        for (const Vertex& vertex : vertices) result.emplace(vertex.id, vertex.position);
+        return result;
+    }();
     for (const EdgeType type : {EdgeType::Border, EdgeType::Obstacle}) {
-        std::unordered_map<VertexId, std::vector<VertexId>> adjacency;
-        for (const GeometryEdge& edge : edges) {
-            if (edge.type != type) continue;
-            adjacency[edge.first].push_back(edge.second);
-            adjacency[edge.second].push_back(edge.first);
-        }
-
+        // Build separate graphs so touching edges of different types cannot form one loop.
+        const Adjacency adjacency = BuildAdjacency(edges, type);
         std::unordered_set<VertexId> visited;
         for (const auto& [start, neighbors] : adjacency) {
             (void)neighbors;
             if (visited.contains(start)) continue;
+
+            // Gather one connected component and require every vertex to have degree two.
             std::vector<VertexId> component;
             std::vector<VertexId> pending{start};
             bool is_cycle = true;
@@ -130,43 +199,26 @@ void GeometryModel::RebuildLoops() {
                 pending.pop_back();
                 if (!visited.insert(current).second) continue;
                 component.push_back(current);
-                const auto& adjacent = adjacency[current];
+                const auto& adjacent = adjacency.at(current);
                 if (adjacent.size() != 2) is_cycle = false;
                 for (const VertexId next : adjacent) if (!visited.contains(next)) pending.push_back(next);
             }
             if (!is_cycle || component.size() < 3) continue;
 
             std::vector<VertexId> ordered;
-            ordered.reserve(component.size());
-            VertexId previous = -1; // Relies on id -1 being impossible (which it is at the time of writing)
-            VertexId current = start;
-            do {
-                ordered.push_back(current);
-                const auto& adjacent = adjacency[current];
-                const VertexId next = adjacent[0] == previous ? adjacent[1] : adjacent[0];
-                previous = current;
-                current = next;
-            } while (current != start && ordered.size() <= component.size());
-            if (current != start || ordered.size() != component.size()) continue;
+            if (!OrderCycle(start, adjacency, component, ordered)) continue;
+            // Normalize winding so all returned loops have counterclockwise vertex order.
+            if (SignedTwiceArea(ordered, positions) < 0.0) std::reverse(ordered.begin(), ordered.end());
 
-            double twice_area = 0.0;
-            for (std::size_t i = 0; i < ordered.size(); ++i) {
-                const Vertex* a = FindVertex(ordered[i]);
-                const Vertex* b = FindVertex(ordered[(i + 1) % ordered.size()]);
-                if (a && b) twice_area += a->position.x * b->position.y - b->position.x * a->position.y;
-            }
-            if (twice_area < 0.0) std::reverse(ordered.begin(), ordered.end());
-
-            std::vector<VertexId> key_vertices = ordered;
-            std::sort(key_vertices.begin(), key_vertices.end());
-            std::string key = std::to_string(static_cast<int>(type)) + ":";
-            for (const VertexId id : key_vertices) key += std::to_string(id) + ",";
+            const std::string key = LoopKey(type, ordered);
             const auto prior = previous_orders.find(key);
+            // Assign a completion order only to loops that did not exist before this rebuild.
             const std::uint64_t completion_order = prior == previous_orders.end()
                 ? next_loop_completion_order++ : prior->second;
             loops.push_back(GeometryLoop{type, std::move(ordered), completion_order});
         }
     }
+    // Keep public loop order stable according to when each loop was completed.
     std::sort(loops.begin(), loops.end(), [](const GeometryLoop& a, const GeometryLoop& b) {
         return a.completion_order < b.completion_order;
     });
