@@ -23,6 +23,7 @@ struct GeometryValidation {
 
 class GeometryValidator {
 public:
+    // Validate each loop, select the active border, and determine obstacle containment and conflicts.
     [[nodiscard]] GeometryValidation Validate(const GeometryModel& model) const;
 };
 
