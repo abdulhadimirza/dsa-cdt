@@ -32,12 +32,12 @@ COMPONENTS
 4. Geometry Validator / Region Analyzer
    - Identify closed loops of the same edge type.
    - Reject self-intersecting polygons.
-   - Detect intersecting or overlapping edges.
-   - Ignore conflicting non-border edges.
-   - Propagate the effects of ignored edges to affected loops.
-   - Inactivate any polygon whose loop contains ignored edges.
+   - Select one active valid border in completion order; reselect if it becomes invalid or is removed.
+   - Keep border validity independent of intersections with non-border geometry.
+   - Mark non-border loops eligible only when wholly inside the active border and conflict-free with other non-border loops.
+   - Treat touching, crossing, and overlapping non-border loops as conflicts.
    - Re-evaluate validity after geometry changes.
-   - Expose derived validity states for rendering and mesh input.
+   - Expose derived validity and eligibility states for rendering and mesh input.
 
 5. Renderer
    - Draw vertices, edges, polygons, and regions.
@@ -62,17 +62,17 @@ BORDER
 - If the active border is deleted or becomes invalid, re-evaluate
   the remaining valid border candidates in completion order.
 - Border edges take priority over intersecting non-border edges.
+- Intersections with non-border geometry do not invalidate the border.
 - An incomplete or self-intersecting border is invalid.
 - No valid active border means no mesh generation.
 
 OBSTACLES
 - Must form closed, non-self-intersecting loops.
 - All edges in a loop must have the same type.
-- Intersecting non-border edges are ignored.
-- A loop containing ignored edges is inactive.
-- A polygon crossing the border becomes inactive when its
-  conflicting edges are ignored and its loop is broken.
-- Obstacle polygons outside the border do not contribute to the map.
+- Must lie entirely inside the active border.
+- Touching, crossing, or overlapping another non-border loop makes the loop ineligible.
+- Contact or crossing with the border makes the non-border loop ineligible, but does not invalidate the border.
+- Ineligible loops remain editable and do not contribute to the map.
 - Invalidated polygons remain editable and can become valid again.
 
 VERTICES AND INCOMPLETE GEOMETRY
@@ -89,10 +89,9 @@ VERTICES AND INCOMPLETE GEOMETRY
 INTERSECTIONS
 - Intended adjacent edges sharing their vertex are allowed.
 - Improper intersections and overlapping segments are conflicts.
-- Conflicting non-border edges are ignored.
-- Border edges are preserved when conflicting with other edges.
-- Ignore the intersecting edges and account for the resulting
-  chain and polygon invalidation effects.
+- Touching, crossing, and overlapping between non-border loops are conflicts.
+- Border edges are preserved when conflicting with non-border edges; border validity is unaffected.
+- Resolve conflicts by loop eligibility, without deleting or ignoring editable edges.
 - Near-coincident geometry and tolerance policies are deferred.
 - Geometry predicates should be reusable by the CDT where possible.
 
@@ -120,7 +119,6 @@ DESIGN GUIDELINES
 
 
 DECISIONS TO SETTLE LATER
-- Whether touching unrelated polygons at a vertex is allowed.
 - How geometric tolerances and near-coincident edges are handled.
 - Whether edge snapping will be supported.
 - How numerical robustness and degenerate cases are handled
