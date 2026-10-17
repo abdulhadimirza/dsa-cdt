@@ -51,6 +51,33 @@ void TestLoopValidity() {
     Check(open.Loops().empty(), "open chain is not a loop");
 }
 
+void TestAdjacentEdgeValidity() {
+    cdt::GeometryModel model;
+    AddLoop(model, {{0, 0}, {4, 0}, {2, 0}, {2, 3}, {0, 3}}, cdt::EdgeType::Obstacle);
+    AddLoop(model, {{10, 0}, {14, 0}, {14, 0}, {14, 3}, {10, 3}}, cdt::EdgeType::Obstacle);
+    AddLoop(model, {{20, 0}, {22, 0}, {24, 0}, {24, 3}, {20, 3}}, cdt::EdgeType::Obstacle);
+    AddLoop(model, {{30, 0}, {34, 0}, {34, 3}, {30, 3}}, cdt::EdgeType::Obstacle);
+    const auto validation = Validate(model);
+    Check(!validation.loops[0].individually_valid, "adjacent reverse edges are invalid");
+    Check(!validation.loops[1].individually_valid, "zero-length edge is invalid");
+    Check(validation.loops[2].individually_valid, "collinear edges continuing forward are valid");
+    Check(validation.loops[3].individually_valid, "ordinary adjacent corner is valid");
+}
+
+void TestScaleAwareValidity() {
+    for (const double scale : {1e-6, 1.0, 1e6}) {
+        cdt::GeometryModel model;
+        AddLoop(model, {{0, 0}, {4 * scale, 0}, {4 * scale, 3 * scale}, {0, 3 * scale}},
+            cdt::EdgeType::Border);
+        AddLoop(model, {{scale, scale}, {2 * scale, scale}, {2 * scale, 2 * scale}, {scale, 2 * scale}},
+            cdt::EdgeType::Obstacle);
+        const auto validation = Validate(model);
+        Check(validation.loops[0].individually_valid, "border valid at coordinate scale");
+        Check(validation.loops[1].individually_valid && validation.loops[1].eligible,
+            "contained obstacle valid at coordinate scale");
+    }
+}
+
 void TestBorderOrderAndFallback() {
     cdt::GeometryModel model;
     const auto first = AddLoop(model, {{0, 0}, {10, 0}, {10, 10}, {0, 10}}, cdt::EdgeType::Border);
@@ -96,6 +123,25 @@ void TestObstacleConflicts() {
     Check(validation.loops[3].eligible, "separate obstacle remains eligible");
 }
 
+void TestOutOfBorderObstaclesAreIgnoredForConflicts() {
+    cdt::GeometryModel model;
+    AddLoop(model, {{0, 0}, {20, 0}, {20, 20}, {0, 20}}, cdt::EdgeType::Border);
+    AddLoop(model, {{16, 5}, {19, 5}, {19, 9}, {16, 9}}, cdt::EdgeType::Obstacle);
+    AddLoop(model, {{18, 5}, {22, 5}, {22, 9}, {18, 9}}, cdt::EdgeType::Obstacle);
+    AddLoop(model, {{22, 5}, {26, 5}, {26, 9}, {22, 9}}, cdt::EdgeType::Obstacle);
+    AddLoop(model, {{20, 12}, {24, 12}, {24, 16}, {20, 16}}, cdt::EdgeType::Obstacle);
+    const auto validation = Validate(model);
+    Check(validation.loops[1].inside_active_border && validation.loops[1].eligible,
+        "partly outside obstacle cannot disqualify fully inside obstacle");
+    Check(!validation.loops[1].intersects_conflict, "ignored outside obstacles do not report conflicts");
+    Check(!validation.loops[2].inside_active_border && !validation.loops[2].eligible,
+        "partly outside obstacle remains ineligible");
+    Check(!validation.loops[3].inside_active_border && !validation.loops[3].eligible,
+        "fully outside obstacle remains ineligible");
+    Check(!validation.loops[4].inside_active_border && !validation.loops[4].eligible,
+        "border-touching obstacle remains ineligible");
+}
+
 void TestPointAndSegmentContactConflicts() {
     cdt::GeometryModel point_contact;
     AddLoop(point_contact, {{0, 0}, {30, 0}, {30, 30}, {0, 30}}, cdt::EdgeType::Border);
@@ -129,9 +175,12 @@ void TestRevalidationAfterDeletion() {
 
 int main() {
     TestLoopValidity();
+    TestAdjacentEdgeValidity();
+    TestScaleAwareValidity();
     TestBorderOrderAndFallback();
     TestObstacleContainmentAndBorderPriority();
     TestObstacleConflicts();
+    TestOutOfBorderObstaclesAreIgnoredForConflicts();
     TestPointAndSegmentContactConflicts();
     TestRevalidationAfterDeletion();
     std::cout << "Geometry validation tests passed\n";
