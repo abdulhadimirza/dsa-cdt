@@ -56,6 +56,7 @@ add_executable(${PROJECT_NAME}
 # 1. Explicitly tell the compiler where to find headers
 target_include_directories(${PROJECT_NAME} PRIVATE 
     src
+    external
     ${imgui_SOURCE_DIR}
     ${rlimgui_SOURCE_DIR}
 )
