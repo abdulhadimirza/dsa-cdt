@@ -5,11 +5,12 @@
 namespace cdt {
 
 ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
-    Vector2d mouse_world, const GeometryModel& model, const EditorState& editor) {
+    Vector2d mouse_world, const GeometryModel& model, const EditorState& editor,
+    bool has_baked_mesh, bool bake_attempted, GenerationStatus last_bake_status) {
     ControlRequests requests{};
 
     ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(320.0f, 500.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(360.0f, 680.0f), ImGuiCond_FirstUseEver);
 
     if (ImGui::Begin("Canvas & Points Controls")) {
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Camera & World Space");
@@ -67,6 +68,17 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "%s", editor.status_message.c_str());
         }
         requests.clear_geometry = ImGui::Button("Clear Geometry", ImVec2(-1.0f, 24.0f));
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Navmesh");
+        requests.bake_navmesh = ImGui::Button("Bake Navmesh", ImVec2(-1.0f, 24.0f));
+        requests.delete_navmesh = ImGui::Button("Delete Navmesh", ImVec2(-1.0f, 24.0f));
+        ImGui::Text("Stored mesh: %s", has_baked_mesh ? "yes" : "no");
+        if (!bake_attempted) ImGui::TextDisabled("Last bake: not attempted");
+        else switch (last_bake_status) {
+            case GenerationStatus::Success: ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Last bake: success"); break;
+            case GenerationStatus::NoActiveBorder: ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Last bake: no active border"); break;
+            case GenerationStatus::Failed: ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Last bake: failed"); break;
+        }
     }
     ImGui::End();
 

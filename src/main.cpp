@@ -3,6 +3,7 @@
 #include "rlImGui.h"
 
 #include "app/CameraController.hpp"
+#include "cdt/ConstrainedDelaunay.hpp"
 #include "editor/EditorController.hpp"
 #include "model/GeometryModel.hpp"
 #include "render/SceneRenderer.hpp"
@@ -10,6 +11,7 @@
 #include "ui/ControlPanel.hpp"
 
 #include <algorithm>
+#include <optional>
 
 namespace {
 
@@ -31,6 +33,10 @@ int main() {
     cdt::EditorController editor;
     cdt::SceneRenderer renderer;
     cdt::GeometryValidator validator;
+    cdt::ConstrainedDelaunay triangulator;
+    std::optional<cdt::ConstrainedMesh> baked_mesh;
+    bool bake_attempted = false;
+    cdt::GenerationStatus last_bake_status = cdt::GenerationStatus::Failed;
     cdt::ControlPanel control_panel;
 
     while (!WindowShouldClose()) {
@@ -56,18 +62,26 @@ int main() {
         ClearBackground(background_color);
         BeginMode2D(camera.GetCamera());
         camera.DrawWorldGrid();
-        renderer.DrawWorld(geometry, validation, editor.State());
+        renderer.DrawWorld(geometry, validation, editor.State(), baked_mesh ? &*baked_mesh : nullptr);
         EndMode2D();
 
         renderer.DrawOverlays(geometry, control_panel.Options(), camera.GetCamera(), editor.State());
         rlImGuiBegin();
         const cdt::ControlRequests requests = control_panel.Draw(
-            camera.GetCamera(), mouse_screen, mouse_world, geometry, editor.State());
+            camera.GetCamera(), mouse_screen, mouse_world, geometry, editor.State(),
+            baked_mesh.has_value(), bake_attempted, last_bake_status);
         rlImGuiEnd();
 
         if (requests.reset_view) camera.ResetView(Vector2{0.0f, 0.0f});
         if (requests.selected_tool) editor.SetTool(*requests.selected_tool);
         if (requests.selected_edit_behavior) editor.SetEditBehavior(*requests.selected_edit_behavior);
+        if (requests.bake_navmesh) {
+            const cdt::GenerationResult result = triangulator.Generate(geometry, validation);
+            bake_attempted = true;
+            last_bake_status = result.status;
+            if (result.status == cdt::GenerationStatus::Success) baked_mesh = result.mesh;
+        }
+        if (requests.delete_navmesh) baked_mesh.reset();
         if (requests.clear_geometry) {
             geometry.Clear();
             editor.ClearInteraction();

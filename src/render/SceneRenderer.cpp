@@ -23,6 +23,10 @@ constexpr Color inactive_obstacle_color{245, 80, 85, 255};
 constexpr Color invalid_loop_color{245, 80, 85, 255};
 constexpr Color edge_preview_color{220, 235, 245, 170};
 constexpr Color chain_move_color{90, 235, 185, 230};
+constexpr Color traversable_fill{35, 125, 225, 150};
+constexpr Color obstacle_fill{230, 55, 135, 175};
+constexpr Color traversable_mesh_edge{100, 195, 255, 235};
+constexpr Color obstacle_mesh_edge{255, 135, 195, 245};
 
 Vector2 ToRaylib(Vector2d position) {
     return Vector2{static_cast<float>(position.x), static_cast<float>(position.y)};
@@ -31,7 +35,19 @@ Vector2 ToRaylib(Vector2d position) {
 } // namespace
 
 void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidation& validation,
-    const EditorState& editor) const {
+    const EditorState& editor, const ConstrainedMesh* mesh) const {
+    if (mesh) for (const MeshTriangle& triangle : mesh->triangles) {
+        const Vector2 a = ToRaylib(mesh->vertices[triangle.vertices[0]].position);
+        const Vector2 b = ToRaylib(mesh->vertices[triangle.vertices[1]].position);
+        const Vector2 c = ToRaylib(mesh->vertices[triangle.vertices[2]].position);
+        const bool obstacle = triangle.region == TriangleRegion::Obstacle;
+        const Color fill = obstacle ? obstacle_fill : traversable_fill;
+        const Color edge = obstacle ? obstacle_mesh_edge : traversable_mesh_edge;
+        DrawTriangle(a, b, c, fill);
+        DrawLineEx(a, b, 1.5f, edge);
+        DrawLineEx(b, c, 1.5f, edge);
+        DrawLineEx(c, a, 1.5f, edge);
+    }
     const std::unordered_set<VertexId> moving_chain_vertices(
         editor.chain_move_vertices.begin(), editor.chain_move_vertices.end());
     const auto is_loop_edge = [&model](const GeometryEdge& edge) {

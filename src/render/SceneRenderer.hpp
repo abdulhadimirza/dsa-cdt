@@ -1,6 +1,7 @@
 #pragma once
 
 #include "editor/EditorState.hpp"
+#include "cdt/ConstrainedDelaunay.hpp"
 #include "model/GeometryModel.hpp"
 #include "validation/GeometryValidator.hpp"
 #include "raylib.h"
@@ -14,7 +15,8 @@ struct RenderOptions {
 
 class SceneRenderer {
 public:
-    void DrawWorld(const GeometryModel& model, const GeometryValidation& validation, const EditorState& editor) const;
+    void DrawWorld(const GeometryModel& model, const GeometryValidation& validation, const EditorState& editor,
+        const ConstrainedMesh* mesh) const;
     void DrawOverlays(const GeometryModel& model, const RenderOptions& options,
         const Camera2D& camera, const EditorState& editor) const;
 };

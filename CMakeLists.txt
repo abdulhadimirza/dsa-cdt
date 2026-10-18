@@ -40,6 +40,7 @@ FetchContent_MakeAvailable(rlimgui)
 # Define our executable target
 add_executable(${PROJECT_NAME} 
     src/main.cpp
+    src/cdt/ConstrainedDelaunay.cpp
     src/app/CameraController.cpp
     src/model/GeometryModel.cpp
     src/validation/GeometryValidator.cpp
@@ -74,6 +75,15 @@ if(BUILD_TESTING)
     )
     target_include_directories(GeometryValidationTests PRIVATE src)
     add_test(NAME GeometryValidationTests COMMAND GeometryValidationTests)
+
+    add_executable(ConstrainedDelaunayTests
+        tests/ConstrainedDelaunayTests.cpp
+        src/cdt/ConstrainedDelaunay.cpp
+        src/model/GeometryModel.cpp
+        src/validation/GeometryValidator.cpp
+    )
+    target_include_directories(ConstrainedDelaunayTests PRIVATE src external)
+    add_test(NAME ConstrainedDelaunayTests COMMAND ConstrainedDelaunayTests)
 endif()
 
 
