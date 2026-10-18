@@ -43,7 +43,9 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidati
         const bool obstacle = triangle.region == TriangleRegion::Obstacle;
         const Color fill = obstacle ? obstacle_fill : traversable_fill;
         const Color edge = obstacle ? obstacle_mesh_edge : traversable_mesh_edge;
-        DrawTriangle(a, b, c, fill);
+        // The 2D canvas transform reverses winding; swap two vertices so
+        // raylib's back-face culling keeps the filled triangle visible.
+        //DrawTriangle(a, c, b, fill);
         DrawLineEx(a, b, 1.5f, edge);
         DrawLineEx(b, c, 1.5f, edge);
         DrawLineEx(c, a, 1.5f, edge);

@@ -11,6 +11,7 @@
 #include "ui/ControlPanel.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <optional>
 
 namespace {
@@ -80,6 +81,8 @@ int main() {
             bake_attempted = true;
             last_bake_status = result.status;
             if (result.status == cdt::GenerationStatus::Success) baked_mesh = result.mesh;
+            else if (result.status == cdt::GenerationStatus::Failed)
+                std::cerr << "Navmesh generation failed: " << result.message << '\n';
         }
         if (requests.delete_navmesh) baked_mesh.reset();
         if (requests.clear_geometry) {

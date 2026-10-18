@@ -218,21 +218,28 @@ GenerationResult ConstrainedDelaunay::Generate(const GeometryModel& model,
     }
 
     std::set<Edge> constraints;
+    // Temporarily disabled constraint splitting. Recover each loop edge directly below.
+    // for (const LoopIndices& loop : loops) for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
+    //     const std::size_t start = loop.vertices[i], finish = loop.vertices[(i + 1) % loop.vertices.size()];
+    //     if (start == finish) return {GenerationStatus::Failed, {}, "Coincident constraint endpoints."};
+    //     const Vector2d direction = source_points[finish] - source_points[start];
+    //     const double length_sq = direction.length_sq();
+    //     std::vector<std::pair<double, std::size_t>> split_points{{0.0, start}, {1.0, finish}};
+    //     for (std::size_t candidate = 0; candidate < source_points.size(); ++candidate) {
+    //         if (candidate == start || candidate == finish ||
+    //             Orient(source_points[start], source_points[finish], source_points[candidate]) != 0.0) continue;
+    //         const double t = (source_points[candidate] - source_points[start]).dot(direction) / length_sq;
+    //         if (t > 0.0 && t < 1.0) split_points.emplace_back(t, candidate);
+    //     }
+    //     std::sort(split_points.begin(), split_points.end());
+    //     for (std::size_t split = 1; split < split_points.size(); ++split)
+    //         constraints.insert(MakeEdge(split_points[split - 1].second, split_points[split].second));
+    // }
+    // Add each original loop edge without splitting it at other input vertices.
     for (const LoopIndices& loop : loops) for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
         const std::size_t start = loop.vertices[i], finish = loop.vertices[(i + 1) % loop.vertices.size()];
         if (start == finish) return {GenerationStatus::Failed, {}, "Coincident constraint endpoints."};
-        const Vector2d direction = source_points[finish] - source_points[start];
-        const double length_sq = direction.length_sq();
-        std::vector<std::pair<double, std::size_t>> split_points{{0.0, start}, {1.0, finish}};
-        for (std::size_t candidate = 0; candidate < source_points.size(); ++candidate) {
-            if (candidate == start || candidate == finish ||
-                Orient(source_points[start], source_points[finish], source_points[candidate]) != 0.0) continue;
-            const double t = (source_points[candidate] - source_points[start]).dot(direction) / length_sq;
-            if (t > 0.0 && t < 1.0) split_points.emplace_back(t, candidate);
-        }
-        std::sort(split_points.begin(), split_points.end());
-        for (std::size_t split = 1; split < split_points.size(); ++split)
-            constraints.insert(MakeEdge(split_points[split - 1].second, split_points[split].second));
+        constraints.insert(MakeEdge(start, finish));
     }
     if (source_points.size() < 3) return {GenerationStatus::Failed, {}, "Not enough distinct input vertices."};
     for (std::size_t i = 0; i < source_points.size(); ++i) for (std::size_t j = i + 1; j < source_points.size(); ++j)
