@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <deque>
 #include <map>
+#include <optional>
 #include <set>
 #include <stddef.h>
 #include <type_traits>
@@ -13,19 +15,88 @@
 #include "robust-predicates/geompred.hpp"
 
 namespace cdt {
-namespace {
+namespace detail {
 
 using Edge = std::array<std::size_t, 2>;
 using Triangle = std::array<std::size_t, 3>;
+using TriangleIndex = std::size_t;
+
+struct StoredTriangle {
+    Triangle vertexIndices{};
+    std::array<std::optional<TriangleIndex>, 3> neighborTriangleIndices{};
+    bool isPresent{true};
+};
+struct TriangleOnEdge { TriangleIndex triangleIndex{}; std::size_t oppositeVertexIndex{}; };
+struct TrianglesOnEdge { std::array<TriangleOnEdge, 2> triangles{}; std::size_t triangleCount{}; };
+struct TriangleMesh {
+    std::vector<StoredTriangle> triangles;
+    std::map<Edge, TrianglesOnEdge> trianglesByEdge;
+    bool hasValidTopology{true};
+};
+
+} // namespace detail
+namespace {
+
+using detail::Edge;
+using detail::Triangle;
+using detail::TriangleIndex;
+using detail::StoredTriangle;
+using detail::TriangleOnEdge;
+using detail::TrianglesOnEdge;
+using detail::TriangleMesh;
+// Store the smaller index first so undirected edges have one canonical key.
+Edge MakeEdge(std::size_t a, std::size_t b) { return a < b ? Edge{a, b} : Edge{b, a}; }
+
+bool AddTriangle(TriangleMesh& triangleMesh, Triangle vertexIndices) {
+    for (std::size_t opposite = 0; opposite < 3; ++opposite) {
+        const Edge edge = MakeEdge(vertexIndices[(opposite + 1) % 3], vertexIndices[(opposite + 2) % 3]);
+        auto it = triangleMesh.trianglesByEdge.find(edge);
+        if (it != triangleMesh.trianglesByEdge.end() && it->second.triangleCount == 2) { triangleMesh.hasValidTopology = false; return false; }
+    }
+    const TriangleIndex triangleIndex = triangleMesh.triangles.size();
+    triangleMesh.triangles.push_back({vertexIndices, {}, true});
+    for (std::size_t opposite = 0; opposite < 3; ++opposite) {
+        const Edge edge = MakeEdge(vertexIndices[(opposite + 1) % 3], vertexIndices[(opposite + 2) % 3]);
+        auto& trianglesOnEdge = triangleMesh.trianglesByEdge[edge];
+        if (trianglesOnEdge.triangleCount == 1) {
+            const auto other = trianglesOnEdge.triangles[0];
+            triangleMesh.triangles[triangleIndex].neighborTriangleIndices[opposite] = other.triangleIndex;
+            triangleMesh.triangles[other.triangleIndex].neighborTriangleIndices[other.oppositeVertexIndex] = triangleIndex;
+        }
+        trianglesOnEdge.triangles[trianglesOnEdge.triangleCount++] = {triangleIndex, opposite};
+    }
+    return true;
+}
+
+void RemoveTriangle(TriangleMesh& triangleMesh, TriangleIndex triangleIndex) {
+    StoredTriangle& triangle = triangleMesh.triangles[triangleIndex];
+    if (!triangle.isPresent) return;
+    for (std::size_t opposite = 0; opposite < 3; ++opposite) {
+        const Edge edge = MakeEdge(triangle.vertexIndices[(opposite + 1) % 3], triangle.vertexIndices[(opposite + 2) % 3]);
+        auto it = triangleMesh.trianglesByEdge.find(edge);
+        if (it == triangleMesh.trianglesByEdge.end()) { triangleMesh.hasValidTopology = false; continue; }
+        auto& trianglesOnEdge = it->second;
+        for (std::size_t i = 0; i < trianglesOnEdge.triangleCount; ++i) if (trianglesOnEdge.triangles[i].triangleIndex == triangleIndex) {
+            trianglesOnEdge.triangles[i] = trianglesOnEdge.triangles[trianglesOnEdge.triangleCount - 1];
+            --trianglesOnEdge.triangleCount;
+            if (trianglesOnEdge.triangleCount == 0) triangleMesh.trianglesByEdge.erase(it);
+            else {
+                const auto survivor = trianglesOnEdge.triangles[0];
+                triangleMesh.triangles[survivor.triangleIndex].neighborTriangleIndices[survivor.oppositeVertexIndex].reset();
+            }
+            break;
+        }
+    }
+    triangle.isPresent = false;
+}
+
+bool HasEdge(const TriangleMesh& triangleMesh, const Edge& edge) { return triangleMesh.trianglesByEdge.contains(edge); }
 
 // Set up the exact geometry checks once. The predicates need this initialization before use.
 void InitializePredicates() {
     static const bool initialized = [] { mp_float::exactinit(); return true; }();
     (void)initialized;
 }
-
-// Store the smaller index first. This lets code compare an edge without depending on its direction.
-Edge MakeEdge(std::size_t a, std::size_t b) { return a < b ? Edge{a, b} : Edge{b, a}; }
 
 // Return the signed side of C relative to AB. Other functions use the sign to test turns and crossings.
 double Orient(const Vector2d& a, const Vector2d& b, const Vector2d& c) {
@@ -80,39 +151,29 @@ bool ProperlyIntersects(const Vector2d& a, const Vector2d& b, const Vector2d& c,
         ((cd_a > 0.0 && cd_b < 0.0) || (cd_a < 0.0 && cd_b > 0.0));
 }
 
-// Search the triangle edges for this edge. Constraint recovery uses this to know when it is finished.
-bool HasEdge(const std::vector<Triangle>& triangles, const Edge& edge) {
-    for (const Triangle& t : triangles)
-        for (int i = 0; i < 3; ++i)
-            if (MakeEdge(t[i], t[(i + 1) % 3]) == edge) return true;
-    return false;
-}
-
 // Find the two triangles sharing an edge and replace their shared edge with the other diagonal.
 // Reject boundary edges, non-convex pairs, and zero-area results so the mesh stays valid.
-bool FlipEdge(std::vector<Triangle>& triangles, const Edge& edge, const std::vector<Vector2d>& points) {
-    // Begin: find both faces touching the edge and the opposite corner of each face.
-    // A flip is possible only when the edge is shared by exactly two triangles.
-    std::vector<std::pair<std::size_t, std::size_t>> adjacent;
-    for (std::size_t ti = 0; ti < triangles.size(); ++ti) {
-        const Triangle& t = triangles[ti];
-        for (int i = 0; i < 3; ++i)
-            if (MakeEdge(t[i], t[(i + 1) % 3]) == edge)
-                adjacent.emplace_back(ti, t[(i + 2) % 3]);
-    }
-    if (adjacent.size() != 2) return false;
+bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Vector2d>& points) {
+    // Step 1: adjacency gives both incident faces and opposite vertices directly.
+    auto found = triangleMesh.trianglesByEdge.find(edge);
+    if (found == triangleMesh.trianglesByEdge.end() || found->second.triangleCount != 2) return false;
+    const auto adjacentTriangles = found->second.triangles;
+    const TriangleIndex firstTriangleIndex = adjacentTriangles[0].triangleIndex;
+    const TriangleIndex secondTriangleIndex = adjacentTriangles[1].triangleIndex;
+    const std::size_t c = triangleMesh.triangles[firstTriangleIndex].vertexIndices[adjacentTriangles[0].oppositeVertexIndex];
+    const std::size_t d = triangleMesh.triangles[secondTriangleIndex].vertexIndices[adjacentTriangles[1].oppositeVertexIndex];
     // End: the candidate edge has two adjacent triangles to check.
 
     // Begin: verify the replacement diagonal makes two non-flat triangles, then replace the old faces.
     // This keeps the mesh connected and avoids introducing zero-area faces.
-    const std::size_t a = edge[0], b = edge[1], c = adjacent[0].second, d = adjacent[1].second;
+    const std::size_t a = edge[0], b = edge[1];
     if (c == d || !ProperlyIntersects(points[a], points[b], points[c], points[d])) return false;
     Triangle first = Ccw({c, d, a}, points), second = Ccw({d, c, b}, points);
     if (Orient(points[first[0]], points[first[1]], points[first[2]]) == 0.0 ||
         Orient(points[second[0]], points[second[1]], points[second[2]]) == 0.0) return false;
-    const std::size_t i0 = adjacent[0].first, i1 = adjacent[1].first;
-    triangles[std::min(i0, i1)] = first;
-    triangles[std::max(i0, i1)] = second;
+    // Step 2: remove the old pair, then register the replacement pair and all local links.
+    RemoveTriangle(triangleMesh, firstTriangleIndex); RemoveTriangle(triangleMesh, secondTriangleIndex);
+    if (!AddTriangle(triangleMesh, first) || !AddTriangle(triangleMesh, second)) { triangleMesh.hasValidTopology = false; return false; }
     // End: both faces now use the replacement diagonal.
     return true;
 }
@@ -134,59 +195,60 @@ std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vect
     points.emplace_back(cx - 32.0 * span, cy - 16.0 * span);
     points.emplace_back(cx + 32.0 * span, cy - 16.0 * span);
     points.emplace_back(cx, cy + 32.0 * span);
-    std::vector<Triangle> triangles{Ccw({n, n + 1, n + 2}, points)};
+    TriangleMesh triangleMesh;
+    AddTriangle(triangleMesh, Ccw({n, n + 1, n + 2}, points));
 
     // Begin: insert each input point by removing affected triangles and filling their exposed outline.
     // This updates the mesh incrementally as each point is added.
     for (std::size_t pi = 0; pi < n; ++pi) {
-        std::vector<bool> bad(triangles.size(), false);
+        std::vector<bool> bad(triangleMesh.triangles.size(), false);
         std::map<Edge, int> boundary;
         bool found = false;
-        for (std::size_t ti = 0; ti < triangles.size(); ++ti) {
-            const Triangle& t = triangles[ti];
+        for (std::size_t ti = 0; ti < triangleMesh.triangles.size(); ++ti) {
+            if (!triangleMesh.triangles[ti].isPresent) continue;
+            const Triangle& t = triangleMesh.triangles[ti].vertexIndices;
             if (InBall(points[t[0]], points[t[1]], points[t[2]], points[pi]) > 0.0) {
                 bad[ti] = true; found = true;
                 for (int e = 0; e < 3; ++e) ++boundary[MakeEdge(t[e], t[(e + 1) % 3])];
             }
         }
         if (!found) continue;
-        std::vector<Triangle> kept;
-        for (std::size_t ti = 0; ti < triangles.size(); ++ti) if (!bad[ti]) kept.push_back(triangles[ti]);
+        // Step: retain the existing global cavity scan, but update topology through adjacency helpers.
+        for (std::size_t ti = 0; ti < bad.size(); ++ti) if (bad[ti]) RemoveTriangle(triangleMesh, ti);
         for (const auto& [edge, count] : boundary) if (count == 1) {
             Triangle t = Ccw({edge[0], edge[1], pi}, points);
-            if (Orient(points[t[0]], points[t[1]], points[t[2]]) != 0.0) kept.push_back(t);
+            if (Orient(points[t[0]], points[t[1]], points[t[2]]) != 0.0) AddTriangle(triangleMesh, t);
         }
-        triangles.swap(kept);
+        if (!triangleMesh.hasValidTopology) break;
     }
     // End: all input points have been added to the temporary triangulation.
 
     // Remove faces that use temporary vertices and restore the point list to only the input vertices.
-    triangles.erase(std::remove_if(triangles.begin(), triangles.end(), [n](const Triangle& t) {
-        return t[0] >= n || t[1] >= n || t[2] >= n;
-    }), triangles.end());
+    std::vector<Triangle> triangles;
+    for (const StoredTriangle& triangle : triangleMesh.triangles) if (triangle.isPresent && triangle.vertexIndices[0] < n && triangle.vertexIndices[1] < n && triangle.vertexIndices[2] < n) triangles.push_back(triangle.vertexIndices);
     points.resize(n);
-    return triangles;
+    return triangleMesh.hasValidTopology ? triangles : std::vector<Triangle>{};
 }
 
 // Add a required loop edge by repeatedly flipping mesh edges that cross it.
 // Stop when the edge exists or no allowed flip can make progress.
-bool RecoverConstraint(const Edge& constraint, std::vector<Triangle>& triangles,
+bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
     const std::vector<Vector2d>& points, std::set<Edge>& fixed) {
-    const std::size_t limit = triangles.size() * triangles.size() + 32;
+    const std::size_t limit = triangleMesh.trianglesByEdge.size() * triangleMesh.trianglesByEdge.size() + 32;
     // Begin: flip crossing mesh edges until the required loop edge appears or no flip can help.
     // Mark recovered edges fixed so later steps do not remove the border or obstacle outline.
     for (std::size_t iteration = 0; iteration < limit; ++iteration) {
-        if (HasEdge(triangles, constraint)) { fixed.insert(constraint); return true; }
+        if (HasEdge(triangleMesh, constraint)) { fixed.insert(constraint); return true; }
         std::vector<Edge> crossing;
-        for (const Triangle& t : triangles) for (int i = 0; i < 3; ++i) {
-            const Edge e = MakeEdge(t[i], t[(i + 1) % 3]);
-            if (e != constraint && ProperlyIntersects(points[constraint[0]], points[constraint[1]],
-                points[e[0]], points[e[1]])) crossing.push_back(e);
+        for (const auto& [edge, trianglesOnEdge] : triangleMesh.trianglesByEdge) {
+            (void)trianglesOnEdge;
+            if (edge != constraint && ProperlyIntersects(points[constraint[0]], points[constraint[1]],
+                points[edge[0]], points[edge[1]])) crossing.push_back(edge);
         }
         std::sort(crossing.begin(), crossing.end());
         crossing.erase(std::unique(crossing.begin(), crossing.end()), crossing.end());
         bool flipped = false;
-        for (const Edge& e : crossing) if (!fixed.contains(e) && FlipEdge(triangles, e, points)) {
+        for (const Edge& edge : crossing) if (!fixed.contains(edge) && FlipEdge(triangleMesh, edge, points)) {
             flipped = true; break;
         }
         if (!flipped) return false;
@@ -197,30 +259,33 @@ bool RecoverConstraint(const Edge& constraint, std::vector<Triangle>& triangles,
 
 // Check shared, non-constraint edges and flip ones that violate the circle rule.
 // Repeat until no edge needs changing or the safety limit is reached.
-bool Legalize(std::vector<Triangle>& triangles, const std::vector<Vector2d>& points,
+bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
     const std::set<Edge>& fixed) {
-    const std::size_t limit = triangles.size() * triangles.size() * 8 + 64;
-    // Begin: rebuild edge adjacency and inspect each shared edge for a Delaunay violation.
-    // Boundary constraints are skipped because their shape must remain fixed.
-    for (std::size_t iteration = 0; iteration < limit; ++iteration) {
-        std::map<Edge, std::vector<std::size_t>> adjacent;
-        for (std::size_t ti = 0; ti < triangles.size(); ++ti)
-            for (int e = 0; e < 3; ++e) adjacent[MakeEdge(triangles[ti][e], triangles[ti][(e + 1) % 3])].push_back(ti);
-        bool changed = false;
-        for (const auto& [edge, faces] : adjacent) {
-            if (faces.size() != 2 || fixed.contains(edge)) continue;
-            auto opposite = [&](const Triangle& t) {
-                for (std::size_t v : t) if (v != edge[0] && v != edge[1]) return v;
-                return edge[0];
-            };
-            const std::size_t c = opposite(triangles[faces[0]]), d = opposite(triangles[faces[1]]);
-            if (c == d || !ProperlyIntersects(points[edge[0]], points[edge[1]], points[c], points[d])) continue;
-            Triangle t = Ccw({edge[0], edge[1], c}, points);
-            if (InBall(points[t[0]], points[t[1]], points[t[2]], points[d]) > 0.0 &&
-                FlipEdge(triangles, edge, points)) { changed = true; break; }
+    const std::size_t limit = triangleMesh.trianglesByEdge.size() * triangleMesh.trianglesByEdge.size() * 8 + 64;
+    // Seed the worklist once; each successful flip adds only its local edges.
+    std::deque<Edge> pending;
+    for (const auto& [edge, trianglesOnEdge] : triangleMesh.trianglesByEdge) { (void)trianglesOnEdge; pending.push_back(edge); }
+    std::size_t checked = 0;
+    while (!pending.empty() && checked++ < limit) {
+        const Edge edge = pending.front(); pending.pop_front();
+        auto it = triangleMesh.trianglesByEdge.find(edge);
+        if (it == triangleMesh.trianglesByEdge.end() || it->second.triangleCount != 2 || fixed.contains(edge)) continue;
+        const auto adjacentTriangles = it->second.triangles;
+        const std::size_t c = triangleMesh.triangles[adjacentTriangles[0].triangleIndex].vertexIndices[adjacentTriangles[0].oppositeVertexIndex];
+        const std::size_t d = triangleMesh.triangles[adjacentTriangles[1].triangleIndex].vertexIndices[adjacentTriangles[1].oppositeVertexIndex];
+        if (c == d || !ProperlyIntersects(points[edge[0]], points[edge[1]], points[c], points[d])) continue;
+        Triangle t = Ccw({edge[0], edge[1], c}, points);
+        if (InBall(points[t[0]], points[t[1]], points[t[2]], points[d]) <= 0.0) continue;
+        const std::size_t old_triangle_count = triangleMesh.triangles.size();
+        if (!FlipEdge(triangleMesh, edge, points)) continue;
+        // Recheck the changed faces' three edges; these include every edge whose opposite face changed.
+        for (std::size_t triangleIndex = old_triangle_count; triangleIndex < triangleMesh.triangles.size(); ++triangleIndex) {
+            const StoredTriangle& triangle = triangleMesh.triangles[triangleIndex];
+            for (std::size_t opposite = 0; opposite < 3; ++opposite)
+                pending.push_back(MakeEdge(triangle.vertexIndices[(opposite + 1) % 3], triangle.vertexIndices[(opposite + 2) % 3]));
         }
-        if (!changed) return true;
     }
+    if (pending.empty()) return triangleMesh.hasValidTopology;
     // End: the safety limit was reached before the mesh settled.
     return false;
 }
@@ -320,21 +385,29 @@ bool BuildConstrainedTriangulation(const InputGeometry& input, const std::set<Ed
     // Begin: build triangles from the points, then recover and protect each required loop edge.
     // These stages create the constrained mesh that respects the selected outlines.
     std::vector<Vector2d> points;
-    triangles = BowyerWatson(input.points, points);
-    if (triangles.empty()) {
+    std::vector<Triangle> initial = BowyerWatson(input.points, points);
+    if (initial.empty()) {
         error = "Could not triangulate input vertices.";
+        return false;
+    }
+    TriangleMesh triangleMesh;
+    for (const Triangle& triangle : initial) if (!AddTriangle(triangleMesh, triangle)) {
+        error = "Could not build triangle adjacency.";
         return false;
     }
 
     std::set<Edge> fixed;
-    for (const Edge& edge : constraints) if (!RecoverConstraint(edge, triangles, points, fixed)) {
+    for (const Edge& edge : constraints) if (!RecoverConstraint(edge, triangleMesh, points, fixed)) {
         error = "Could not recover every boundary constraint.";
         return false;
     }
-    if (!Legalize(triangles, points, fixed)) {
+    if (!Legalize(triangleMesh, points, fixed)) {
         error = "Constrained edge legalization did not converge.";
         return false;
     }
+    triangles.clear();
+    for (const StoredTriangle& triangle : triangleMesh.triangles)
+        if (triangle.isPresent) triangles.push_back(triangle.vertexIndices);
     // End: the mesh contains all constraints and its remaining edges have been improved.
     return true;
 }
