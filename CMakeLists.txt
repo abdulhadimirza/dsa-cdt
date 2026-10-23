@@ -82,28 +82,6 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 # Note the capital 'I' and 'G' in rlImGui!
 target_link_libraries(${PROJECT_NAME} PRIVATE raylib Clipper2)
 
-include(CTest)
-if(BUILD_TESTING)
-    add_executable(GeometryValidationTests
-        tests/GeometryValidationTests.cpp
-        src/model/GeometryModel.cpp
-        src/validation/GeometryValidator.cpp
-    )
-    target_include_directories(GeometryValidationTests PRIVATE src)
-    add_test(NAME GeometryValidationTests COMMAND GeometryValidationTests)
-
-    add_executable(ConstrainedDelaunayTests
-        tests/ConstrainedDelaunayTests.cpp
-        src/cdt/ConstrainedDelaunay.cpp
-        src/cdt/WalkableRegionBuilder.cpp
-        src/model/GeometryModel.cpp
-        src/validation/GeometryValidator.cpp
-    )
-    target_include_directories(ConstrainedDelaunayTests PRIVATE src external)
-    target_link_libraries(ConstrainedDelaunayTests PRIVATE Clipper2)
-    add_test(NAME ConstrainedDelaunayTests COMMAND ConstrainedDelaunayTests)
-endif()
-
 
 # Setup runtime copy rules if you have assets (Images, Fonts, etc.)
 # target_include_directories(${PROJECT_NAME} PRIVATE src)

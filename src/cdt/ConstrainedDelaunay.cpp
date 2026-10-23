@@ -5,7 +5,10 @@
 #include <cmath>
 #include <cstddef>
 #include <deque>
+#include <functional>
+#include <limits>
 #include <map>
+#include <queue>
 #include <optional>
 #include <set>
 
@@ -87,8 +90,76 @@ void RemoveTriangle(TriangleMesh& triangleMesh, TriangleIndex triangleIndex) {
             }
             break;
         }
+
     }
     triangle.isPresent = false;
+}
+
+// Remembers the first triangle and edge slot that use a particular mesh edge.
+struct FirstEdgeUse {
+    std::size_t triangleIndex{};
+    std::size_t edgeSlot{};
+};
+
+// Fill each triangle's neighbor slots from the edges in the final, filtered mesh.
+// A slot points across the edge opposite the vertex with the same index.
+bool BuildFinalAdjacency(ConstrainedMesh& mesh) {
+    std::map<Edge, FirstEdgeUse> firstTriangleByEdge;
+
+    // Clear old links and process every edge of every final triangle.
+    for (std::size_t triangleIndex = 0; triangleIndex < mesh.triangles.size(); ++triangleIndex) {
+        MeshTriangle& triangle = mesh.triangles[triangleIndex];
+        triangle.neighbors = {};
+
+        for (std::size_t edgeSlot = 0; edgeSlot < 3; ++edgeSlot) {
+            const std::size_t firstVertex = triangle.vertices[(edgeSlot + 1) % 3];
+            const std::size_t secondVertex = triangle.vertices[(edgeSlot + 2) % 3];
+            if (firstVertex >= mesh.vertices.size() || secondVertex >= mesh.vertices.size() ||
+                firstVertex == secondVertex) return false;
+
+            // Sorting the endpoints makes the same edge match in either direction.
+            const Edge edge = MakeEdge(firstVertex, secondVertex);
+            const auto [edgeEntry, isFirstUse] = firstTriangleByEdge.emplace(
+                edge, FirstEdgeUse{triangleIndex, edgeSlot});
+
+            // One use means a boundary edge. A second use links both triangles.
+            if (isFirstUse) continue;
+
+            const FirstEdgeUse firstUse = edgeEntry->second;
+            auto& firstNeighbor = mesh.triangles[firstUse.triangleIndex].neighbors[firstUse.edgeSlot];
+            if (firstNeighbor) return false; // A third triangle would make this edge non-manifold.
+
+            firstNeighbor = triangleIndex;
+            triangle.neighbors[edgeSlot] = firstUse.triangleIndex;
+        }
+    }
+    return true;
+}
+
+// Return the average of a triangle's three vertex positions.
+Vector2d Centroid(const ConstrainedMesh& mesh, const MeshTriangle& triangle) {
+    const Vector2d firstPosition = mesh.vertices[triangle.vertices[0]].position;
+    const Vector2d secondPosition = mesh.vertices[triangle.vertices[1]].position;
+    const Vector2d thirdPosition = mesh.vertices[triangle.vertices[2]].position;
+    return (firstPosition + secondPosition + thirdPosition) / 3.0;
+}
+
+// Return the signed 2D cross product of two vectors from a shared origin.
+double Cross(Vector2d firstVector, Vector2d secondVector) {
+    return firstVector.x * secondVector.y - firstVector.y * secondVector.x;
+}
+
+// Check whether a point is inside or on the boundary of a counterclockwise triangle.
+bool ContainsPoint(const ConstrainedMesh& mesh, const MeshTriangle& triangle, Vector2d point) {
+    const Vector2d first = mesh.vertices[triangle.vertices[0]].position;
+    const Vector2d second = mesh.vertices[triangle.vertices[1]].position;
+    const Vector2d third = mesh.vertices[triangle.vertices[2]].position;
+    constexpr double edgeTolerance = 1e-10;
+
+    // For counterclockwise triangles, an interior point is left of all three directed edges.
+    return Cross(second - first, point - first) >= -edgeTolerance &&
+        Cross(third - second, point - second) >= -edgeTolerance &&
+        Cross(first - third, point - third) >= -edgeTolerance;
 }
 
 // Report whether the mesh currently contains the requested undirected edge.
@@ -363,7 +434,7 @@ void KeepTrianglesInsideRegion(const InputGeometry& input, const std::vector<Tri
             return false;
         }();
         if (insideHole) continue;
-        mesh.triangles.push_back({triangle, TriangleRegion::Traversable});
+        mesh.triangles.push_back({triangle, {}, TriangleRegion::Traversable});
     }
 }
 
@@ -447,7 +518,155 @@ GenerationResult ConstrainedDelaunay::Generate(const GeometryModel& model,
 
     if (componentCount == 0 || combined.triangles.empty())
         return {GenerationStatus::Failed, {}, "Agent radius leaves no triangulatable walkable area."};
+    if (!BuildFinalAdjacency(combined))
+        return {GenerationStatus::Failed, {}, "Generated navmesh has non-manifold or invalid adjacency."};
     return {GenerationStatus::Success, std::move(combined), "Navmesh baked successfully."};
+}
+
+PathResult FindPath(const ConstrainedMesh& mesh, Vector2d start, Vector2d goal) {
+    PathResult result;
+    const std::size_t triangleCount = mesh.triangles.size();
+    if (triangleCount == 0) {
+        result.status = PathStatus::InvalidMesh;
+        return result;
+    }
+
+    // Confirm every triangle refers to vertices that exist before using geometry helpers.
+    for (const MeshTriangle& triangle : mesh.triangles) {
+        for (const std::size_t vertexIndex : triangle.vertices) {
+            if (vertexIndex >= mesh.vertices.size()) {
+                result.status = PathStatus::InvalidMesh;
+                return result;
+            }
+        }
+    }
+
+    // Find the first walkable triangle that contains the requested point.
+    const auto findContainingTriangle = [&](Vector2d point) -> std::optional<std::size_t> {
+        for (std::size_t triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex) {
+            const MeshTriangle& triangle = mesh.triangles[triangleIndex];
+            if (triangle.region == TriangleRegion::Traversable && ContainsPoint(mesh, triangle, point))
+                return triangleIndex;
+        }
+        return std::nullopt;
+    };
+    const auto startTriangle = findContainingTriangle(start);
+    if (!startTriangle) { result.status = PathStatus::StartOutsideMesh; return result; }
+    const auto goalTriangle = findContainingTriangle(goal);
+    if (!goalTriangle) { result.status = PathStatus::GoalOutsideMesh; return result; }
+
+    // A* stores the best known cost to each triangle and the previous triangle on its route.
+    const double infinity = std::numeric_limits<double>::infinity();
+    std::vector<double> costToTriangle(triangleCount, infinity);
+    std::vector<std::size_t> previousTriangle(triangleCount, triangleCount);
+    using QueueEntry = std::pair<double, std::size_t>;
+    std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> pendingTriangles;
+    costToTriangle[*startTriangle] = 0.0;
+    pendingTriangles.emplace(Centroid(mesh, mesh.triangles[*startTriangle]).distance(goal), *startTriangle);
+
+    // Expand adjacent walkable triangles, preferring those with the smallest estimated total cost.
+    while (!pendingTriangles.empty()) {
+        const auto [estimatedTotalCost, currentTriangleIndex] = pendingTriangles.top();
+        pendingTriangles.pop();
+        (void)estimatedTotalCost;
+        if (currentTriangleIndex == *goalTriangle) break;
+
+        const Vector2d currentCenter = Centroid(mesh, mesh.triangles[currentTriangleIndex]);
+        for (const auto& neighborIndex : mesh.triangles[currentTriangleIndex].neighbors) {
+            if (!neighborIndex) continue; // An empty slot is a boundary, so there is no triangle to enter.
+            if (*neighborIndex >= triangleCount ||
+                mesh.triangles[*neighborIndex].region != TriangleRegion::Traversable) {
+                result.status = PathStatus::InvalidMesh;
+                return result;
+            }
+
+            const Vector2d neighborCenter = Centroid(mesh, mesh.triangles[*neighborIndex]);
+            const double candidateCost = costToTriangle[currentTriangleIndex] + currentCenter.distance(neighborCenter);
+            if (candidateCost < costToTriangle[*neighborIndex]) {
+                costToTriangle[*neighborIndex] = candidateCost;
+                previousTriangle[*neighborIndex] = currentTriangleIndex;
+                const double estimatedRemainingCost = neighborCenter.distance(goal);
+                pendingTriangles.emplace(candidateCost + estimatedRemainingCost, *neighborIndex);
+            }
+        }
+    }
+
+    // Follow the saved previous-triangle links backwards to recover the route corridor.
+    if (*startTriangle != *goalTriangle && previousTriangle[*goalTriangle] == triangleCount) {
+        result.status = PathStatus::NoPath;
+        return result;
+    }
+    for (std::size_t triangleIndex = *goalTriangle;; triangleIndex = previousTriangle[triangleIndex]) {
+        result.triangleCorridor.push_back(triangleIndex);
+        if (triangleIndex == *startTriangle) break;
+    }
+    std::reverse(result.triangleCorridor.begin(), result.triangleCorridor.end());
+
+    // Turn each corridor connection into a left/right portal from the current triangle's winding.
+    struct Portal { Vector2d left; Vector2d right; };
+    std::vector<Portal> portals{{start, start}};
+    for (std::size_t corridorIndex = 0; corridorIndex < result.triangleCorridor.size() - 1; ++corridorIndex) {
+        const std::size_t currentTriangleIndex = result.triangleCorridor[corridorIndex];
+        const std::size_t nextTriangleIndex = result.triangleCorridor[corridorIndex + 1];
+        std::size_t sharedEdgeSlot = 3;
+        for (std::size_t edgeSlot = 0; edgeSlot < 3; ++edgeSlot) {
+            if (mesh.triangles[currentTriangleIndex].neighbors[edgeSlot] == nextTriangleIndex) {
+                sharedEdgeSlot = edgeSlot;
+                break;
+            }
+        }
+        if (sharedEdgeSlot == 3) {
+            result.status = PathStatus::InvalidMesh;
+            result.triangleCorridor.clear();
+            return result;
+        }
+        const auto& triangle = mesh.triangles[currentTriangleIndex];
+        const Vector2d edgeStart = mesh.vertices[triangle.vertices[(sharedEdgeSlot + 1) % 3]].position;
+        const Vector2d edgeEnd = mesh.vertices[triangle.vertices[(sharedEdgeSlot + 2) % 3]].position;
+        portals.push_back({edgeEnd, edgeStart});
+    }
+    portals.push_back({goal, goal});
+
+    // Pull a short route through the portal sequence, adding a waypoint when a portal corner closes the funnel.
+    result.waypoints.push_back(start);
+    Vector2d funnelTip = start;
+    Vector2d funnelLeft = portals[0].left;
+    Vector2d funnelRight = portals[0].right;
+    std::size_t funnelTipIndex = 0, funnelLeftIndex = 0, funnelRightIndex = 0;
+    for (std::size_t portalIndex = 1; portalIndex < portals.size(); ++portalIndex) {
+        const Vector2d newLeft = portals[portalIndex].left;
+        const Vector2d newRight = portals[portalIndex].right;
+        if (Cross(funnelRight - funnelTip, newRight - funnelTip) <= 0) {
+            if (funnelTip == funnelRight || Cross(funnelLeft - funnelTip, newRight - funnelTip) > 0) {
+                funnelRight = newRight;
+                funnelRightIndex = portalIndex;
+            } else {
+                result.waypoints.push_back(funnelLeft);
+                funnelTip = funnelLeft;
+                funnelTipIndex = funnelLeftIndex;
+                funnelLeft = funnelRight = funnelTip;
+                funnelLeftIndex = funnelRightIndex = funnelTipIndex;
+                portalIndex = funnelTipIndex;
+                continue;
+            }
+        }
+        if (Cross(funnelLeft - funnelTip, newLeft - funnelTip) >= 0) {
+            if (funnelTip == funnelLeft || Cross(funnelRight - funnelTip, newLeft - funnelTip) < 0) {
+                funnelLeft = newLeft;
+                funnelLeftIndex = portalIndex;
+            } else {
+                result.waypoints.push_back(funnelRight);
+                funnelTip = funnelRight;
+                funnelTipIndex = funnelRightIndex;
+                funnelLeft = funnelRight = funnelTip;
+                funnelLeftIndex = funnelRightIndex = funnelTipIndex;
+                portalIndex = funnelTipIndex;
+            }
+        }
+    }
+    if (result.waypoints.back() != goal) result.waypoints.push_back(goal);
+    result.status = PathStatus::Success;
+    return result;
 }
 
 } // namespace cdt
