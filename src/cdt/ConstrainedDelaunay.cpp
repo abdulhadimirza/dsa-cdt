@@ -46,6 +46,7 @@ Edge MakeEdge(std::size_t firstVertexIndex, std::size_t secondVertexIndex) {
     return firstVertexIndex < secondVertexIndex ? Edge{firstVertexIndex, secondVertexIndex} : Edge{secondVertexIndex, firstVertexIndex};
 }
 
+// Add a face and update its edge records and neighboring-face links.
 bool AddTriangle(TriangleMesh& triangleMesh, Triangle vertexIndices) {
     for (std::size_t opposite = 0; opposite < 3; ++opposite) {
         const Edge edge = MakeEdge(vertexIndices[(opposite + 1) % 3], vertexIndices[(opposite + 2) % 3]);
@@ -67,6 +68,7 @@ bool AddTriangle(TriangleMesh& triangleMesh, Triangle vertexIndices) {
     return true;
 }
 
+// Remove a face from edge adjacency and clear neighbor links on the remaining faces.
 void RemoveTriangle(TriangleMesh& triangleMesh, TriangleIndex triangleIndex) {
     StoredTriangle& triangle = triangleMesh.triangles[triangleIndex];
     if (!triangle.isPresent) return;
@@ -89,6 +91,7 @@ void RemoveTriangle(TriangleMesh& triangleMesh, TriangleIndex triangleIndex) {
     triangle.isPresent = false;
 }
 
+// Report whether the mesh currently contains the requested undirected edge.
 bool HasEdge(const TriangleMesh& triangleMesh, const Edge& edge) { return triangleMesh.trianglesByEdge.contains(edge); }
 
 // Set up the exact geometry checks once. The predicates need this initialization before use.
@@ -375,6 +378,7 @@ bool UsesEveryInputVertex(const ConstrainedMesh& mesh) {
     return !mesh.triangles.empty() && std::find(usedVertices.begin(), usedVertices.end(), false) == usedVertices.end();
 }
 
+// Append a component's vertices, faces, and constraints while shifting its local indices.
 void AppendComponentMesh(const InputGeometry& input, const std::set<Edge>& constraints,
     ConstrainedMesh& combinedMesh) {
     const std::size_t baseVertexIndex = combinedMesh.vertices.size();
@@ -408,6 +412,7 @@ GenerationResult ConstrainedDelaunay::Generate(const GeometryModel& model,
     std::size_t componentCount = 0;
     for (const detail::WalkableRegion& region : walkableRegions) {
         InputGeometry input;
+        // Add a contour to this component and retain matching model vertex IDs when available.
         auto addContour = [&](const std::vector<Vector2d>& contour) {
             ContourIndices contourIndices;
             contourIndices.vertices.reserve(contour.size());

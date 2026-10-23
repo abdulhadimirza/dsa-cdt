@@ -9,6 +9,7 @@
 namespace cdt::detail {
 namespace {
 
+// Convert a model loop to a Clipper path, rejecting missing or non-finite vertices.
 bool MakeSourceContour(const GeometryModel& model, const GeometryLoop& loop, Clipper2Lib::PathD& contour) {
     for (VertexId id : loop.vertices) {
         const Vertex* vertex = model.FindVertex(id);
@@ -18,6 +19,7 @@ bool MakeSourceContour(const GeometryModel& model, const GeometryLoop& loop, Cli
     return contour.size() >= 3;
 }
 
+// Convert Clipper's double-precision points to the CDT's Vector2d representation.
 std::vector<Vector2d> ToVectorContour(const Clipper2Lib::PathD& contour) {
     std::vector<Vector2d> result;
     result.reserve(contour.size());
