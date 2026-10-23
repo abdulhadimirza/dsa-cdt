@@ -1,5 +1,5 @@
 #include "cdt/ConstrainedDelaunay.hpp"
-#include "clipper2/clipper.h"
+#include "cdt/WalkableRegionBuilder.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,10 +8,6 @@
 #include <map>
 #include <optional>
 #include <set>
-#include <stddef.h>
-#include <type_traits>
-#include <unordered_map>
-#include <unordered_set>
 
 #include "robust-predicates/geompred.hpp"
 
@@ -119,34 +115,32 @@ double InBall(const Vector2d& firstTrianglePoint, const Vector2d& secondTriangle
     return geompred::inball2d(firstCoordinates, secondCoordinates, thirdCoordinates, testCoordinates);
 }
 
-// Reverse two loopVertexIndices when needed so later geometry checks receive a counterclockwise triangle.
+// Reverse two vertex indices when needed so later geometry checks receive a counterclockwise triangle.
 Triangle Ccw(Triangle t, const std::vector<Vector2d>& points) {
     if (Orient(points[t[0]], points[t[1]], points[t[2]]) < 0.0) std::swap(t[1], t[2]);
     return t;
 }
 
-// Store a loop using loopVertexIndices into the shared point list, with its border or obstacle role.
-struct LoopIndices { std::vector<std::size_t> vertices; bool obstacle{}; };
+// Store one contour using indices into the shared point list.
+struct ContourIndices { std::vector<std::size_t> vertices; };
 
-// Keep the output vertices, their positions, and the selected loops together during generation.
+// Keep the mesh vertices, point positions, and region contours together during generation.
 struct InputGeometry {
     ConstrainedMesh mesh;
     std::vector<Vector2d> points;
-    std::vector<LoopIndices> loops;
+    std::vector<ContourIndices> contours;
 };
 
-// Test the loop edges with a ray from the point. This lets generation keep only triangles inside the border.
-bool PointInLoop(const Vector2d& point, const LoopIndices& loop, const std::vector<Vector2d>& points) {
-    // Begin: count horizontal-ray crossings. Each crossingEdges toggles inside/outside; this classifies triangle centers.
-    // Count crossings of a horizontal ray; an odd count means the point is inside the loop.
+// Test contour membership with a ray so generation can keep only triangles inside the border.
+bool PointInLoop(const Vector2d& point, const ContourIndices& contour, const std::vector<Vector2d>& points) {
+    // Count horizontal-ray crossings; an odd count means the point is inside the contour.
     bool inside = false;
-    for (std::size_t i = 0, j = loop.vertices.size() - 1; i < loop.vertices.size(); j = i++) {
-        const Vector2d& a = points[loop.vertices[i]];
-        const Vector2d& b = points[loop.vertices[j]];
+    for (std::size_t i = 0, j = contour.vertices.size() - 1; i < contour.vertices.size(); j = i++) {
+        const Vector2d& a = points[contour.vertices[i]];
+        const Vector2d& b = points[contour.vertices[j]];
         if ((a.y > point.y) != (b.y > point.y) &&
             point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
     }
-    // End: the odd/even crossingEdges result is the point's loop membership.
     return inside;
 }
 
@@ -159,7 +153,7 @@ bool ProperlyIntersects(const Vector2d& a, const Vector2d& b, const Vector2d& c,
 }
 
 // Find the two triangles sharing an edge and replace their shared edge with the other diagonal.
-// Reject cavityBoundaryEdges edges, non-convex pairs, and zero-area results so the mesh stays valid.
+// Reject constraint edges, non-convex pairs, and zero-area results so the mesh stays valid.
 bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Vector2d>& points) {
     // Step 1: adjacency gives both incident faces and opposite vertices directly.
     auto edgeIterator = triangleMesh.trianglesByEdge.find(edge);
@@ -188,7 +182,7 @@ bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Ve
 // Add points one at a time, replacing triangles whose circles contain each point with new triangles.
 // A large temporary triangle starts the process; it is removed before returning the mesh.
 std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vector<Vector2d>& points) {
-    // Find the input bounds and create a temporary triangle around them so every point starts inside a face.
+    // Add a temporary enclosing triangle so every input point begins inside the triangulation.
     points = input;
     double minimumX = points[0].x, maximumX = minimumX, minimumY = points[0].y, maximumY = minimumY;
     for (const Vector2d& p : points) {
@@ -205,32 +199,30 @@ std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vect
     TriangleMesh triangleMesh;
     AddTriangle(triangleMesh, Ccw({n, n + 1, n + 2}, points));
 
-    // Begin: insert each input point by removing affected triangles and filling their exposed outline.
-    // This updates the mesh incrementally as each point is added.
+    // Point insertion: remove triangles whose circumcircles contain the point, then fill the cavity
+    // from edges that occur only once on the removed triangles' boundary.
     for (std::size_t pointIndex = 0; pointIndex < n; ++pointIndex) {
-        std::vector<bool> badTriangles(triangleMesh.triangles.size(), false);
-        std::map<Edge, int> cavityBoundaryEdges;
+        std::vector<bool> trianglesToRemove(triangleMesh.triangles.size(), false);
+        std::map<Edge, int> boundaryEdgeCounts;
         bool foundCavityTriangle = false;
         for (std::size_t triangleIndex = 0; triangleIndex < triangleMesh.triangles.size(); ++triangleIndex) {
             if (!triangleMesh.triangles[triangleIndex].isPresent) continue;
             const Triangle& t = triangleMesh.triangles[triangleIndex].vertexIndices;
             if (InBall(points[t[0]], points[t[1]], points[t[2]], points[pointIndex]) > 0.0) {
-                badTriangles[triangleIndex] = true; foundCavityTriangle = true;
-                for (int edgeIndex = 0; edgeIndex < 3; ++edgeIndex) ++cavityBoundaryEdges[MakeEdge(t[edgeIndex], t[(edgeIndex + 1) % 3])];
+                trianglesToRemove[triangleIndex] = true; foundCavityTriangle = true;
+                for (int edgeIndex = 0; edgeIndex < 3; ++edgeIndex) ++boundaryEdgeCounts[MakeEdge(t[edgeIndex], t[(edgeIndex + 1) % 3])];
             }
         }
         if (!foundCavityTriangle) continue;
-        // Step: retain the existing global cavity scan, but update topology through adjacency helpers.
-        for (std::size_t triangleIndex = 0; triangleIndex < badTriangles.size(); ++triangleIndex) if (badTriangles[triangleIndex]) RemoveTriangle(triangleMesh, triangleIndex);
-        for (const auto& [edge, count] : cavityBoundaryEdges) if (count == 1) {
+        for (std::size_t triangleIndex = 0; triangleIndex < trianglesToRemove.size(); ++triangleIndex)
+            if (trianglesToRemove[triangleIndex]) RemoveTriangle(triangleMesh, triangleIndex);
+        for (const auto& [edge, count] : boundaryEdgeCounts) if (count == 1) {
             Triangle t = Ccw({edge[0], edge[1], pointIndex}, points);
             if (Orient(points[t[0]], points[t[1]], points[t[2]]) != 0.0) AddTriangle(triangleMesh, t);
         }
         if (!triangleMesh.hasValidTopology) break;
     }
-    // End: all input points have been added to the temporary triangulation.
-
-    // Remove faces that use temporary vertices and restore the point list to only the input vertices.
+    // Remove faces that use temporary vertices before returning the completed triangulation.
     std::vector<Triangle> triangles;
     for (const StoredTriangle& triangle : triangleMesh.triangles) if (triangle.isPresent && triangle.vertexIndices[0] < n && triangle.vertexIndices[1] < n && triangle.vertexIndices[2] < n) triangles.push_back(triangle.vertexIndices);
     points.resize(n);
@@ -242,8 +234,8 @@ std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vect
 bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
     const std::vector<Vector2d>& points, std::set<Edge>& fixedConstraintEdges) {
     const std::size_t iterationLimit = triangleMesh.trianglesByEdge.size() * triangleMesh.trianglesByEdge.size() + 32;
-    // Begin: flip crossingEdges mesh edges until the required loop edge appears or no flip can help.
-    // Mark recovered edges fixedConstraintEdges so later steps do not remove the border or obstacle outline.
+    // Constraint recovery: flip crossing mesh edges until the required edge exists, then protect it
+    // from legalization so the input contour remains part of the mesh boundary.
     for (std::size_t iteration = 0; iteration < iterationLimit; ++iteration) {
         if (HasEdge(triangleMesh, constraint)) { fixedConstraintEdges.insert(constraint); return true; }
         std::vector<Edge> crossingEdges;
@@ -260,7 +252,6 @@ bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
         }
         if (!flipped) return false;
     }
-    // End: reaching the iterationLimit means recovery did not make enough progress.
     return false;
 }
 
@@ -269,7 +260,8 @@ bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
 bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
     const std::set<Edge>& fixedConstraintEdges) {
     const std::size_t iterationLimit = triangleMesh.trianglesByEdge.size() * triangleMesh.trianglesByEdge.size() * 8 + 64;
-    // Seed the worklist once; each successful flip adds only its local edges.
+    // Legalization: check shared, unconstrained edges and flip those that violate the Delaunay circle rule.
+    // Changed faces add their edges back to the worklist; the limit prevents an endless loop.
     std::deque<Edge> edgesToCheck;
     for (const auto& [edge, trianglesOnEdge] : triangleMesh.trianglesByEdge) { (void)trianglesOnEdge; edgesToCheck.push_back(edge); }
     std::size_t checkedEdgeCount = 0;
@@ -297,100 +289,35 @@ bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
     return false;
 }
 
-// Copy one selected loop into the shared input lists and preserve its source vertex IDs.
-// The index map avoids adding a shared model vertex twice; false means the loop data is incomplete.
-bool AddLoop(const GeometryModel& model, const GeometryLoop& loop, bool obstacle,
-    InputGeometry& input, std::unordered_map<VertexId, std::size_t>& inputVertexIndexById) {
-    // Begin: resolve each loop vertex and assign a shared index for the mesh and triangle routines.
-    // Invalid or non-finite vertices stop collection because later geometry checks need valid coordinates.
-    LoopIndices loopVertexIndices;
-    loopVertexIndices.obstacle = obstacle;
-    for (VertexId id : loop.vertices) {
-        const Vertex* vertex = model.FindVertex(id);
-        if (!vertex || !std::isfinite(vertex->position.x) || !std::isfinite(vertex->position.y)) return false;
-        auto [it, wasInserted] = inputVertexIndexById.emplace(id, input.mesh.vertices.size());
-        if (wasInserted) {
-            input.mesh.vertices.push_back({id, vertex->position});
-            input.points.push_back(vertex->position);
-        }
-        loopVertexIndices.vertices.push_back(it->second);
-    }
-    if (loopVertexIndices.vertices.size() < 3) return false;
-    input.loops.push_back(std::move(loopVertexIndices));
-    // End: the complete loop is now stored in the shared input geometry.
-    return true;
-}
-
-// Select the active border and eligible obstacles, then copy their points into the triangulation input.
-// Return a specific message if validation and model data do not agree.
-bool CollectInputLoops(const GeometryModel& model, const GeometryValidation& validation,
-    InputGeometry& input, std::string& error) {
-    if (!validation.active_border_index) {
-        error = "No valid active border.";
-        return false;
-    }
-
-    const std::size_t border_index = *validation.active_border_index;
-    if (border_index >= model.Loops().size() || border_index >= validation.loops.size() ||
-        !validation.loops[border_index].active_border) {
-        error = "Active border input is inconsistent.";
-        return false;
-    }
-    // Begin: add the active border first because later code uses it as the domain cavityBoundaryEdges.
-    std::unordered_map<VertexId, std::size_t> inputVertexIndexById;
-    if (!AddLoop(model, model.Loops()[border_index], false, input, inputVertexIndexById)) {
-        error = "Active border input is inconsistent.";
-        return false;
-    }
-    // End: the border is the first loop in the input list.
-
-    // Include only validated obstacle loops; other loops must not affect the generated mesh.
-    for (std::size_t i = 0; i < model.Loops().size(); ++i) {
-        if (i == border_index || i >= validation.loops.size() || !validation.loops[i].eligible ||
-            model.Loops()[i].type != EdgeType::Obstacle) continue;
-        if (!AddLoop(model, model.Loops()[i], true, input, inputVertexIndexById)) {
-            error = "Obstacle input is inconsistent.";
-            return false;
-        }
-    }
-    return true;
-}
-
-// Make one required mesh edge for each consecutive pair of vertices in each selected loop.
+// Make one required mesh edge for each consecutive pair of vertices in each selected contour.
 // These edges keep the generated triangles aligned with the border and obstacle outlines.
 bool BuildConstraints(const InputGeometry& input, std::set<Edge>& constraints, std::string& error) {
-    // Constraint splitting remains disabled for now. Each original loop edge is usedVertices as-is.
-    // Begin: connect each loop vertex to the next, including the closing edge.
-    // These are the exact edges the triangulation must preserve as boundaries.
-    for (const LoopIndices& loop : input.loops) for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
-        const std::size_t startVertexIndex = loop.vertices[i], endVertexIndex = loop.vertices[(i + 1) % loop.vertices.size()];
+    // Record each contour edge, including the edge from its last vertex back to its first.
+    for (const ContourIndices& contour : input.contours) for (std::size_t i = 0; i < contour.vertices.size(); ++i) {
+        const std::size_t startVertexIndex = contour.vertices[i], endVertexIndex = contour.vertices[(i + 1) % contour.vertices.size()];
         if (startVertexIndex == endVertexIndex) {
             error = "Coincident constraint endpoints.";
             return false;
         }
         constraints.insert(MakeEdge(startVertexIndex, endVertexIndex));
     }
-    // End: all original loop edges are recorded as required constraints.
     return true;
 }
 
 // Find duplicate positions belonging to different input vertices, which the triangulator cannot handle.
 bool HasCoincidentPoints(const std::vector<Vector2d>& points) {
-    // Compare each pair once so the caller can report invalid input before building triangles.
-    // Begin: scan every unique pair for identical coordinates.
+    // Compare each pair once because the triangulator cannot use coincident input points.
     for (std::size_t i = 0; i < points.size(); ++i)
         for (std::size_t j = i + 1; j < points.size(); ++j)
             if (points[i] == points[j]) return true;
-    // End: no duplicate coordinate pair was foundCavityTriangle.
     return false;
 }
 
-// Create the initialTriangles triangle mesh, add all required loop edges, then improve its unconstrained edges.
+// Create the initial triangle mesh, recover all required contour edges, then legalize its free edges.
 // Stop at the first failed stage and return its message to the caller.
 bool BuildConstrainedTriangulation(const InputGeometry& input, const std::set<Edge>& constraints,
     std::vector<Triangle>& triangles, std::string& error) {
-    // Begin: build triangles from the points, then recover and protect each required loop edge.
-    // These stages create the constrained mesh that respects the selected outlines.
+    // Build the initial triangulation, recover constraints, and legalize unconstrained edges in order.
     std::vector<Vector2d> points;
     std::vector<Triangle> initialTriangles = BowyerWatson(input.points, points);
     if (initialTriangles.empty()) {
@@ -405,7 +332,7 @@ bool BuildConstrainedTriangulation(const InputGeometry& input, const std::set<Ed
 
     std::set<Edge> fixedConstraintEdges;
     for (const Edge& edge : constraints) if (!RecoverConstraint(edge, triangleMesh, points, fixedConstraintEdges)) {
-        error = "Could not recover every cavityBoundaryEdges constraint.";
+        error = "Could not recover every contour constraint.";
         return false;
     }
     if (!Legalize(triangleMesh, points, fixedConstraintEdges)) {
@@ -415,31 +342,26 @@ bool BuildConstrainedTriangulation(const InputGeometry& input, const std::set<Ed
     triangles.clear();
     for (const StoredTriangle& triangle : triangleMesh.triangles)
         if (triangle.isPresent) triangles.push_back(triangle.vertexIndices);
-    // End: the mesh contains all constraints and its remaining edges have been improved.
     return true;
 }
 
-// Keep triangles inside the border and label those inside an obstacle as blocked.
-// Triangle centers provide a simple point to test against each selected loop.
-void AddTrianglesInsideLoops(const InputGeometry& input, const std::vector<Triangle>& triangles,
+// Keep triangles inside the outer contour and exclude triangles inside holes.
+// Triangle centers provide a simple point to test against each contour.
+void KeepTrianglesInsideRegion(const InputGeometry& input, const std::vector<Triangle>& triangles,
     ConstrainedMesh& mesh) {
-    // Begin: classify each triangle by its triangleCenter, keeping only those inside the border.
-    // Obstacle membership changes the triangleRegion label so navigation can treat those triangles as blocked.
+    // Output filtering: keep triangle centers inside the outer contour and discard centers inside holes.
     for (const Triangle& triangle : triangles) {
         const Vector2d triangleCenter = (input.points[triangle[0]] + input.points[triangle[1]] +
             input.points[triangle[2]]) / 3.0;
-        if (!PointInLoop(triangleCenter, input.loops.front(), input.points)) continue;
-        TriangleRegion triangleRegion = TriangleRegion::Traversable;
-        bool inside_hole = false;
-        for (std::size_t loop_index = 1; loop_index < input.loops.size(); ++loop_index)
-            if (PointInLoop(triangleCenter, input.loops[loop_index], input.points)) {
-                inside_hole = true;
-                break;
-            }
-        if (inside_hole) continue;
-        mesh.triangles.push_back({triangle, triangleRegion});
+        if (!PointInLoop(triangleCenter, input.contours.front(), input.points)) continue;
+        const bool insideHole = [&] {
+            for (std::size_t contourIndex = 1; contourIndex < input.contours.size(); ++contourIndex)
+                if (PointInLoop(triangleCenter, input.contours[contourIndex], input.points)) return true;
+            return false;
+        }();
+        if (insideHole) continue;
+        mesh.triangles.push_back({triangle, TriangleRegion::Traversable});
     }
-    // End: the output mesh now contains only in-domain triangles with triangleRegion labels.
 }
 
 // Check that clipping did not leave any selected input vertex without a triangle.
@@ -453,6 +375,18 @@ bool UsesEveryInputVertex(const ConstrainedMesh& mesh) {
     return !mesh.triangles.empty() && std::find(usedVertices.begin(), usedVertices.end(), false) == usedVertices.end();
 }
 
+void AppendComponentMesh(const InputGeometry& input, const std::set<Edge>& constraints,
+    ConstrainedMesh& combinedMesh) {
+    const std::size_t baseVertexIndex = combinedMesh.vertices.size();
+    combinedMesh.vertices.insert(combinedMesh.vertices.end(), input.mesh.vertices.begin(), input.mesh.vertices.end());
+    for (MeshTriangle triangle : input.mesh.triangles) {
+        for (std::size_t& vertexIndex : triangle.vertices) vertexIndex += baseVertexIndex;
+        combinedMesh.triangles.push_back(triangle);
+    }
+    for (const Edge& edge : constraints)
+        combinedMesh.constraints.push_back({edge[0] + baseVertexIndex, edge[1] + baseVertexIndex});
+}
+
 } // namespace
 
 // Build a mesh from the active border and eligible obstacle loops.
@@ -464,105 +398,49 @@ GenerationResult ConstrainedDelaunay::Generate(const GeometryModel& model,
     if (!validation.active_border_index)
         return {GenerationStatus::NoActiveBorder, {}, "No valid active border."};
 
-    using namespace Clipper2Lib;
-    // A larger arc tolerance produces fewer vertices along the approximated circular joins.
-    constexpr double round_join_tolerance_fraction = 0.20;
-    const double round_join_tolerance = agent_radius * round_join_tolerance_fraction;
-    const std::size_t border_index = *validation.active_border_index;
-    if (border_index >= model.Loops().size() || border_index >= validation.loops.size() ||
-        !validation.loops[border_index].active_border)
-        return {GenerationStatus::Failed, {}, "Active border input is inconsistent."};
+    // Build walkable regions separately, then triangulate and merge each connected component.
+    std::vector<detail::WalkableRegion> walkableRegions;
+    std::string error;
+    if (!detail::BuildWalkableRegions(model, validation, agent_radius, walkableRegions, error))
+        return {GenerationStatus::Failed, {}, error};
 
-    auto source_path = [&](const GeometryLoop& loop, PathD& path) {
-        for (VertexId id : loop.vertices) {
-            const Vertex* vertex = model.FindVertex(id);
-            if (!vertex || !std::isfinite(vertex->position.x) || !std::isfinite(vertex->position.y)) return false;
-            path.emplace_back(vertex->position.x, vertex->position.y);
-        }
-        return path.size() >= 3;
-    };
-    PathsD border_paths;
-    PathD border;
-    if (!source_path(model.Loops()[border_index], border))
-        return {GenerationStatus::Failed, {}, "Active border input is inconsistent."};
-    border_paths.push_back(std::move(border));
-    PathsD inset_border = InflatePaths(border_paths, -agent_radius, JoinType::Round, EndType::Polygon,
-        2.0, 8, round_join_tolerance);
-    if (inset_border.empty())
-        return {GenerationStatus::Failed, {}, "Agent radius removes the walkable border."};
-
-    PathsD obstacles;
-    for (std::size_t i = 0; i < model.Loops().size(); ++i) {
-        if (i == border_index || i >= validation.loops.size() || !validation.loops[i].eligible ||
-            model.Loops()[i].type != EdgeType::Obstacle) continue;
-        PathD path;
-        if (!source_path(model.Loops()[i], path))
-            return {GenerationStatus::Failed, {}, "Obstacle input is inconsistent."};
-        PathsD expanded = InflatePaths(PathsD{path}, agent_radius, JoinType::Round, EndType::Polygon,
-            2.0, 8, round_join_tolerance);
-        obstacles.insert(obstacles.end(), expanded.begin(), expanded.end());
-    }
-    if (!obstacles.empty()) obstacles = Union(obstacles, FillRule::NonZero, 8);
-    PathsD free_contours = Difference(inset_border, obstacles, FillRule::NonZero, 8);
-    if (free_contours.empty())
-        return {GenerationStatus::Failed, {}, "Agent radius leaves no walkable area."};
-    auto contains_path = [](const PathD& path, PointD point) {
-        bool inside = false;
-        for (std::size_t i = 0, j = path.size() - 1; i < path.size(); j = i++) {
-            const auto& a = path[i]; const auto& b = path[j];
-            if ((a.y > point.y) != (b.y > point.y) &&
-                point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
-        }
-        return inside;
-    };
     ConstrainedMesh combined;
-    std::size_t component_count = 0;
-    for (const PathD& outer : free_contours) {
-        if (Area(outer) <= 0.0) continue; // Clipper orients holes opposite to outer contours.
+    std::size_t componentCount = 0;
+    for (const detail::WalkableRegion& region : walkableRegions) {
         InputGeometry input;
-        auto add_path = [&](const PathD& path, bool obstacle) {
-            LoopIndices loop;
-            loop.obstacle = obstacle;
-            for (const PointD& point : path) {
-                const Vector2d position{point.x, point.y};
-                std::optional<VertexId> source_id;
+        auto addContour = [&](const std::vector<Vector2d>& contour) {
+            ContourIndices contourIndices;
+            contourIndices.vertices.reserve(contour.size());
+            for (const Vector2d& position : contour) {
+                std::optional<VertexId> sourceId;
                 for (const Vertex& vertex : model.Vertices())
-                    if (vertex.position == position) { source_id = vertex.id; break; }
+                    if (vertex.position == position) { sourceId = vertex.id; break; }
                 const std::size_t index = input.points.size();
                 input.points.push_back(position);
-                input.mesh.vertices.push_back({source_id, position});
-                loop.vertices.push_back(index);
+                input.mesh.vertices.push_back({sourceId, position});
+                contourIndices.vertices.push_back(index);
             }
-            if (loop.vertices.size() >= 3) input.loops.push_back(std::move(loop));
+            if (contourIndices.vertices.size() >= 3) input.contours.push_back(std::move(contourIndices));
         };
-        add_path(outer, false);
-        for (const PathD& contour : free_contours)
-            if (Area(contour) < 0.0 && !contour.empty() && contains_path(outer, contour.front()))
-                add_path(contour, true);
-        if (input.loops.empty()) continue;
+        addContour(region.outerContour);
+        for (const std::vector<Vector2d>& holeContour : region.holeContours) addContour(holeContour);
+        if (input.contours.empty()) continue;
 
-        std::string error;
         std::set<Edge> constraints;
         if (!BuildConstraints(input, constraints, error) || input.points.size() < 3 || HasCoincidentPoints(input.points))
             return {GenerationStatus::Failed, {}, "Offset contours contain invalid or coincident vertices."};
         std::vector<Triangle> triangles;
         if (!BuildConstrainedTriangulation(input, constraints, triangles, error))
             return {GenerationStatus::Failed, {}, "Could not triangulate offset contours: " + error};
-        AddTrianglesInsideLoops(input, triangles, input.mesh);
+        KeepTrianglesInsideRegion(input, triangles, input.mesh);
         if (!UsesEveryInputVertex(input.mesh))
             return {GenerationStatus::Failed, {}, "An offset walkable component was not completely triangulated."};
 
-        const std::size_t base = combined.vertices.size();
-        combined.vertices.insert(combined.vertices.end(), input.mesh.vertices.begin(), input.mesh.vertices.end());
-        for (MeshTriangle triangle : input.mesh.triangles) {
-            for (std::size_t& vertex : triangle.vertices) vertex += base;
-            combined.triangles.push_back(triangle);
-        }
-        for (const Edge& edge : constraints) combined.constraints.push_back({edge[0] + base, edge[1] + base});
-        ++component_count;
+        AppendComponentMesh(input, constraints, combined);
+        ++componentCount;
     }
 
-    if (component_count == 0 || combined.triangles.empty())
+    if (componentCount == 0 || combined.triangles.empty())
         return {GenerationStatus::Failed, {}, "Agent radius leaves no triangulatable walkable area."};
     return {GenerationStatus::Success, std::move(combined), "Navmesh baked successfully."};
 }

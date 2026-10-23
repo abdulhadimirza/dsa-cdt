@@ -56,6 +56,7 @@ add_executable(${PROJECT_NAME}
     src/main.cpp
     src/app/NavmeshBakeCoordinator.cpp
     src/cdt/ConstrainedDelaunay.cpp
+    src/cdt/WalkableRegionBuilder.cpp
     src/app/CameraController.cpp
     src/model/GeometryModel.cpp
     src/validation/GeometryValidator.cpp
@@ -94,6 +95,7 @@ if(BUILD_TESTING)
     add_executable(ConstrainedDelaunayTests
         tests/ConstrainedDelaunayTests.cpp
         src/cdt/ConstrainedDelaunay.cpp
+        src/cdt/WalkableRegionBuilder.cpp
         src/model/GeometryModel.cpp
         src/validation/GeometryValidator.cpp
     )
