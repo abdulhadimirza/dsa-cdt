@@ -63,10 +63,8 @@ int main() {
     bool bake_attempted = false;
     cdt::GenerationStatus last_bake_status = cdt::GenerationStatus::Failed;
     std::string baked_input_key;
-    std::string pending_input_key;
-    std::string auto_attempted_key;
-    std::uint64_t latest_bake_generation = 0;
-    double pending_since = 0.0;
+    std::uint64_t applied_bake_generation = 0;
+    std::string last_auto_requested_key;
     cdt::ControlPanel control_panel;
 
     while (!WindowShouldClose()) {
@@ -90,7 +88,8 @@ int main() {
         const std::string input_key = TriangulationInputKey(geometry, validation);
 
         if (auto completion = bake_coordinator.TakeCompletion()) {
-            if (completion->generation == latest_bake_generation && completion->input_key == input_key) {
+            if (completion->generation > applied_bake_generation) {
+                applied_bake_generation = completion->generation;
                 bake_attempted = true;
                 last_bake_status = completion->result.status;
                 if (completion->result.status == cdt::GenerationStatus::Success) {
@@ -122,8 +121,7 @@ int main() {
         if (requests.selected_edit_behavior) editor.SetEditBehavior(*requests.selected_edit_behavior);
         if (requests.bake_navmesh) {
             bake_attempted = true;
-            pending_input_key.clear();
-            latest_bake_generation = bake_coordinator.Request(geometry, validation, input_key);
+            (void)bake_coordinator.Request(geometry, validation, input_key);
         }
         if (requests.delete_navmesh) baked_mesh.reset();
         if (requests.clear_geometry) {
@@ -131,16 +129,12 @@ int main() {
             editor.ClearInteraction();
         }
 
-        if (control_panel.AutoBakeNavmesh() && (baked_mesh || bake_coordinator.IsRunning()) &&
-            input_key != baked_input_key && input_key != auto_attempted_key) {
-            if (pending_input_key != input_key) { pending_input_key = input_key; pending_since = GetTime(); }
-            else if (GetTime() - pending_since >= 0.0) {
-                latest_bake_generation = bake_coordinator.Request(geometry, validation, input_key);
-                auto_attempted_key = input_key;
-                bake_attempted = true;
-                pending_input_key.clear();
-            }
-        } else pending_input_key.clear();
+        if (control_panel.AutoBakeNavmesh() && baked_mesh && input_key != baked_input_key &&
+            input_key != last_auto_requested_key) {
+            (void)bake_coordinator.Request(geometry, validation, input_key);
+            last_auto_requested_key = input_key;
+            bake_attempted = true;
+        }
 
         EndDrawing();
     }
