@@ -37,6 +37,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(rlimgui)
 
+# 4. Fetch Clipper2 for polygon offsetting and boolean operations.
+FetchContent_Declare(
+    clipper2
+    GIT_REPOSITORY https://github.com/AngusJohnson/Clipper2.git
+    GIT_TAG        Clipper2_2.0.1
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  CPP
+)
+set(CLIPPER2_UTILS OFF CACHE BOOL "" FORCE)
+set(CLIPPER2_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(CLIPPER2_TESTS OFF CACHE BOOL "" FORCE)
+set(CLIPPER2_USINGZ OFF CACHE STRING "" FORCE)
+FetchContent_MakeAvailable(clipper2)
+
 # Define our executable target
 add_executable(${PROJECT_NAME} 
     src/main.cpp
@@ -65,7 +79,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 # 2. FIX: Link using the actual case-sensitive target names
 # Note the capital 'I' and 'G' in rlImGui!
-target_link_libraries(${PROJECT_NAME} PRIVATE raylib)
+target_link_libraries(${PROJECT_NAME} PRIVATE raylib Clipper2)
 
 include(CTest)
 if(BUILD_TESTING)
