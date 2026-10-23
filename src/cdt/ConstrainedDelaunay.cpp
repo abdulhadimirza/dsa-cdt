@@ -430,11 +430,13 @@ void AddTrianglesInsideLoops(const InputGeometry& input, const std::vector<Trian
             input.points[triangle[2]]) / 3.0;
         if (!PointInLoop(triangleCenter, input.loops.front(), input.points)) continue;
         TriangleRegion triangleRegion = TriangleRegion::Traversable;
+        bool inside_hole = false;
         for (std::size_t loop_index = 1; loop_index < input.loops.size(); ++loop_index)
             if (PointInLoop(triangleCenter, input.loops[loop_index], input.points)) {
-                triangleRegion = TriangleRegion::Obstacle;
+                inside_hole = true;
                 break;
             }
+        if (inside_hole) continue;
         mesh.triangles.push_back({triangle, triangleRegion});
     }
     // End: the output mesh now contains only in-domain triangles with triangleRegion labels.
@@ -504,7 +506,6 @@ GenerationResult ConstrainedDelaunay::Generate(const GeometryModel& model,
     PathsD free_contours = Difference(inset_border, obstacles, FillRule::NonZero, 8);
     if (free_contours.empty())
         return {GenerationStatus::Failed, {}, "Agent radius leaves no walkable area."};
-
     auto contains_path = [](const PathD& path, PointD point) {
         bool inside = false;
         for (std::size_t i = 0, j = path.size() - 1; i < path.size(); j = i++) {
@@ -560,6 +561,7 @@ GenerationResult ConstrainedDelaunay::Generate(const GeometryModel& model,
         for (const Edge& edge : constraints) combined.constraints.push_back({edge[0] + base, edge[1] + base});
         ++component_count;
     }
+
     if (component_count == 0 || combined.triangles.empty())
         return {GenerationStatus::Failed, {}, "Agent radius leaves no triangulatable walkable area."};
     return {GenerationStatus::Success, std::move(combined), "Navmesh baked successfully."};
