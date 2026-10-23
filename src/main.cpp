@@ -24,9 +24,10 @@ constexpr int screen_width = 1280;
 constexpr int screen_height = 800;
 constexpr Color background_color{22, 25, 32, 255};
 
-std::string TriangulationInputKey(const cdt::GeometryModel& model, const cdt::GeometryValidation& validation) {
+std::string TriangulationInputKey(const cdt::GeometryModel& model, const cdt::GeometryValidation& validation, double radius) {
     std::ostringstream key;
     key << std::setprecision(17);
+    key << 'R' << radius << ';';
     if (!validation.active_border_index) return "no-active-border";
     const auto append_loop = [&](std::size_t i) {
         key << 'L' << i << ':';
@@ -66,6 +67,7 @@ int main() {
     std::uint64_t applied_bake_generation = 0;
     std::string last_auto_requested_key;
     cdt::ControlPanel control_panel;
+    double agent_radius = 0.0;
 
     while (!WindowShouldClose()) {
         const Vector2 mouse_screen = GetMousePosition();
@@ -85,7 +87,7 @@ int main() {
         editor_input.escape_pressed = IsKeyPressed(KEY_ESCAPE);
         editor.Update(editor_input, geometry);
         const cdt::GeometryValidation validation = validator.Validate(geometry);
-        const std::string input_key = TriangulationInputKey(geometry, validation);
+        const std::string input_key = TriangulationInputKey(geometry, validation, agent_radius);
 
         if (auto completion = bake_coordinator.TakeCompletion()) {
             if (completion->generation > applied_bake_generation) {
@@ -114,6 +116,8 @@ int main() {
             camera.GetCamera(), mouse_screen, mouse_world, geometry, editor.State(),
             baked_mesh.has_value(), bake_attempted, last_bake_status,
             baked_mesh.has_value() && input_key != baked_input_key, bake_coordinator.IsRunning());
+        if (requests.agent_radius) agent_radius = *requests.agent_radius;
+        const std::string bake_input_key = TriangulationInputKey(geometry, validation, agent_radius);
         rlImGuiEnd();
 
         if (requests.reset_view) camera.ResetView(Vector2{0.0f, 0.0f});
@@ -121,7 +125,7 @@ int main() {
         if (requests.selected_edit_behavior) editor.SetEditBehavior(*requests.selected_edit_behavior);
         if (requests.bake_navmesh) {
             bake_attempted = true;
-            (void)bake_coordinator.Request(geometry, validation, input_key);
+            (void)bake_coordinator.Request(geometry, validation, agent_radius, bake_input_key);
         }
         if (requests.delete_navmesh) baked_mesh.reset();
         if (requests.clear_geometry) {
@@ -129,10 +133,10 @@ int main() {
             editor.ClearInteraction();
         }
 
-        if (control_panel.AutoBakeNavmesh() && baked_mesh && input_key != baked_input_key &&
-            input_key != last_auto_requested_key) {
-            (void)bake_coordinator.Request(geometry, validation, input_key);
-            last_auto_requested_key = input_key;
+        if (control_panel.AutoBakeNavmesh() && baked_mesh && bake_input_key != baked_input_key &&
+            bake_input_key != last_auto_requested_key) {
+            (void)bake_coordinator.Request(geometry, validation, agent_radius, bake_input_key);
+            last_auto_requested_key = bake_input_key;
             bake_attempted = true;
         }
 

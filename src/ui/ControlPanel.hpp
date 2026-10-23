@@ -19,6 +19,7 @@ struct ControlRequests {
     bool delete_navmesh{false};
     std::optional<EditorTool> selected_tool;
     std::optional<EditBehavior> selected_edit_behavior;
+    std::optional<double> agent_radius;
 };
 
 class ControlPanel {
@@ -32,6 +33,7 @@ public:
 private:
     RenderOptions options{};
     bool auto_bake_navmesh{false};
+    double agent_radius{0.0};
 };
 
 } // namespace cdt

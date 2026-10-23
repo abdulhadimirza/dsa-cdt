@@ -1,4 +1,5 @@
 #include "cdt/ConstrainedDelaunay.hpp"
+#include "clipper2/clipper.h"
 
 #include <algorithm>
 #include <cmath>
@@ -455,37 +456,113 @@ bool UsesEveryInputVertex(const ConstrainedMesh& mesh) {
 // Build a mesh from the active border and eligible obstacle loops.
 // Input loops become constraints, triangles are selected by location, and failures return a message.
 GenerationResult ConstrainedDelaunay::Generate(const GeometryModel& model,
-    const GeometryValidation& validation) const {
+    const GeometryValidation& validation, double agent_radius) const {
+    if (!std::isfinite(agent_radius) || agent_radius < 0.0)
+        return {GenerationStatus::Failed, {}, "Agent radius must be a finite, nonnegative world-space value."};
     if (!validation.active_border_index)
         return {GenerationStatus::NoActiveBorder, {}, "No valid active border."};
 
-    // Begin: gather and check source geometry before asking the triangulator to process it.
-    InputGeometry input;
-    std::string error;
-    if (!CollectInputLoops(model, validation, input, error))
-        return {GenerationStatus::Failed, {}, std::move(error)};
-    // Build the required loop edges and reject point sets the triangle builder cannot use.
-    std::set<Edge> constraints;
-    if (!BuildConstraints(input, constraints, error))
-        return {GenerationStatus::Failed, {}, std::move(error)};
-    if (input.points.size() < 3)
-        return {GenerationStatus::Failed, {}, "Not enough distinct input vertices."};
-    if (HasCoincidentPoints(input.points))
-        return {GenerationStatus::Failed, {}, "Coincident input vertices are unsupported."};
-    // End: selected points and loop constraints are ready for triangulation.
+    using namespace Clipper2Lib;
+    // A larger arc tolerance produces fewer vertices along the approximated circular joins.
+    constexpr double round_join_tolerance_fraction = 0.20;
+    const double round_join_tolerance = agent_radius * round_join_tolerance_fraction;
+    const std::size_t border_index = *validation.active_border_index;
+    if (border_index >= model.Loops().size() || border_index >= validation.loops.size() ||
+        !validation.loops[border_index].active_border)
+        return {GenerationStatus::Failed, {}, "Active border input is inconsistent."};
 
-    // Begin: build the constrained triangulation, clip it to the loops, and verify the output.
-    // Each stage can stop with a message when it cannot produce a complete mesh.
-    std::vector<Triangle> triangles;
-    if (!BuildConstrainedTriangulation(input, constraints, triangles, error))
-        return {GenerationStatus::Failed, {}, std::move(error)};
+    auto source_path = [&](const GeometryLoop& loop, PathD& path) {
+        for (VertexId id : loop.vertices) {
+            const Vertex* vertex = model.FindVertex(id);
+            if (!vertex || !std::isfinite(vertex->position.x) || !std::isfinite(vertex->position.y)) return false;
+            path.emplace_back(vertex->position.x, vertex->position.y);
+        }
+        return path.size() >= 3;
+    };
+    PathsD border_paths;
+    PathD border;
+    if (!source_path(model.Loops()[border_index], border))
+        return {GenerationStatus::Failed, {}, "Active border input is inconsistent."};
+    border_paths.push_back(std::move(border));
+    PathsD inset_border = InflatePaths(border_paths, -agent_radius, JoinType::Round, EndType::Polygon,
+        2.0, 8, round_join_tolerance);
+    if (inset_border.empty())
+        return {GenerationStatus::Failed, {}, "Agent radius removes the walkable border."};
 
-    AddTrianglesInsideLoops(input, triangles, input.mesh);
-    for (const Edge& edge : constraints) input.mesh.constraints.push_back(edge);
-    if (!UsesEveryInputVertex(input.mesh))
-        return {GenerationStatus::Failed, {}, "The complete input domain was not triangulated."};
-    // End: the mesh is complete and ready to return.
-    return {GenerationStatus::Success, std::move(input.mesh), "Navmesh baked successfully."};
+    PathsD obstacles;
+    for (std::size_t i = 0; i < model.Loops().size(); ++i) {
+        if (i == border_index || i >= validation.loops.size() || !validation.loops[i].eligible ||
+            model.Loops()[i].type != EdgeType::Obstacle) continue;
+        PathD path;
+        if (!source_path(model.Loops()[i], path))
+            return {GenerationStatus::Failed, {}, "Obstacle input is inconsistent."};
+        PathsD expanded = InflatePaths(PathsD{path}, agent_radius, JoinType::Round, EndType::Polygon,
+            2.0, 8, round_join_tolerance);
+        obstacles.insert(obstacles.end(), expanded.begin(), expanded.end());
+    }
+    if (!obstacles.empty()) obstacles = Union(obstacles, FillRule::NonZero, 8);
+    PathsD free_contours = Difference(inset_border, obstacles, FillRule::NonZero, 8);
+    if (free_contours.empty())
+        return {GenerationStatus::Failed, {}, "Agent radius leaves no walkable area."};
+
+    auto contains_path = [](const PathD& path, PointD point) {
+        bool inside = false;
+        for (std::size_t i = 0, j = path.size() - 1; i < path.size(); j = i++) {
+            const auto& a = path[i]; const auto& b = path[j];
+            if ((a.y > point.y) != (b.y > point.y) &&
+                point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+        }
+        return inside;
+    };
+    ConstrainedMesh combined;
+    std::size_t component_count = 0;
+    for (const PathD& outer : free_contours) {
+        if (Area(outer) <= 0.0) continue; // Clipper orients holes opposite to outer contours.
+        InputGeometry input;
+        auto add_path = [&](const PathD& path, bool obstacle) {
+            LoopIndices loop;
+            loop.obstacle = obstacle;
+            for (const PointD& point : path) {
+                const Vector2d position{point.x, point.y};
+                std::optional<VertexId> source_id;
+                for (const Vertex& vertex : model.Vertices())
+                    if (vertex.position == position) { source_id = vertex.id; break; }
+                const std::size_t index = input.points.size();
+                input.points.push_back(position);
+                input.mesh.vertices.push_back({source_id, position});
+                loop.vertices.push_back(index);
+            }
+            if (loop.vertices.size() >= 3) input.loops.push_back(std::move(loop));
+        };
+        add_path(outer, false);
+        for (const PathD& contour : free_contours)
+            if (Area(contour) < 0.0 && !contour.empty() && contains_path(outer, contour.front()))
+                add_path(contour, true);
+        if (input.loops.empty()) continue;
+
+        std::string error;
+        std::set<Edge> constraints;
+        if (!BuildConstraints(input, constraints, error) || input.points.size() < 3 || HasCoincidentPoints(input.points))
+            return {GenerationStatus::Failed, {}, "Offset contours contain invalid or coincident vertices."};
+        std::vector<Triangle> triangles;
+        if (!BuildConstrainedTriangulation(input, constraints, triangles, error))
+            return {GenerationStatus::Failed, {}, "Could not triangulate offset contours: " + error};
+        AddTrianglesInsideLoops(input, triangles, input.mesh);
+        if (!UsesEveryInputVertex(input.mesh))
+            return {GenerationStatus::Failed, {}, "An offset walkable component was not completely triangulated."};
+
+        const std::size_t base = combined.vertices.size();
+        combined.vertices.insert(combined.vertices.end(), input.mesh.vertices.begin(), input.mesh.vertices.end());
+        for (MeshTriangle triangle : input.mesh.triangles) {
+            for (std::size_t& vertex : triangle.vertices) vertex += base;
+            combined.triangles.push_back(triangle);
+        }
+        for (const Edge& edge : constraints) combined.constraints.push_back({edge[0] + base, edge[1] + base});
+        ++component_count;
+    }
+    if (component_count == 0 || combined.triangles.empty())
+        return {GenerationStatus::Failed, {}, "Agent radius leaves no triangulatable walkable area."};
+    return {GenerationStatus::Success, std::move(combined), "Navmesh baked successfully."};
 }
 
 } // namespace cdt

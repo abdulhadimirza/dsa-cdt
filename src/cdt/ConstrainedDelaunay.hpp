@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -18,7 +19,7 @@ enum class GenerationStatus { Success, NoActiveBorder, Failed };
 
 // A mesh vertex and the geometry vertex it came from.
 struct MeshVertex {
-    VertexId source_id{};
+    std::optional<VertexId> source_id;
     Vector2d position{};
 };
 
@@ -47,7 +48,7 @@ class ConstrainedDelaunay {
 public:
     // Return the generated mesh, or a status and message if generation cannot finish.
     [[nodiscard]] GenerationResult Generate(const GeometryModel& model,
-        const GeometryValidation& validation) const;
+        const GeometryValidation& validation, double agent_radius = 0.0) const;
 };
 
 } // namespace cdt

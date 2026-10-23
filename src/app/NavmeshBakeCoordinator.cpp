@@ -15,11 +15,11 @@ NavmeshBakeCoordinator::~NavmeshBakeCoordinator() {
 }
 
 std::uint64_t NavmeshBakeCoordinator::Request(const GeometryModel& model,
-    const GeometryValidation& validation, std::string input_key) {
+    const GeometryValidation& validation, double agent_radius, std::string input_key) {
     std::lock_guard lock(mutex);
     if (stopping) return next_generation;
     const auto generation = ++next_generation;
-    pending = Job{generation, std::move(input_key), model, validation};
+    pending = Job{generation, std::move(input_key), model, validation, agent_radius};
     wake.notify_one();
     return generation;
 }
@@ -48,7 +48,7 @@ void NavmeshBakeCoordinator::Run() {
             running = true;
         }
         ConstrainedDelaunay triangulator;
-        auto result = triangulator.Generate(job.model, job.validation);
+        auto result = triangulator.Generate(job.model, job.validation, job.agent_radius);
         {
             std::lock_guard lock(mutex);
             running = false;

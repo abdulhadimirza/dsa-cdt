@@ -2,6 +2,9 @@
 
 #include "imgui.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace cdt {
 
 ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
@@ -70,6 +73,11 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
         requests.clear_geometry = ImGui::Button("Clear Geometry", ImVec2(-1.0f, 24.0f));
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Navmesh");
+        double edited_radius = agent_radius;
+        if (ImGui::InputDouble("Agent radius (world units)", &edited_radius, 0.1, 1.0, "%.2f")) {
+            agent_radius = std::isfinite(edited_radius) ? std::max(0.0, edited_radius) : 0.0;
+            requests.agent_radius = agent_radius;
+        }
         ImGui::Checkbox("Auto-bake on triangulation input changes", &auto_bake_navmesh);
         requests.bake_navmesh = ImGui::Button("Bake Navmesh", ImVec2(-1.0f, 24.0f));
         requests.delete_navmesh = ImGui::Button("Delete Navmesh", ImVec2(-1.0f, 24.0f));

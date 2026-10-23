@@ -25,7 +25,7 @@ public:
     NavmeshBakeCoordinator& operator=(const NavmeshBakeCoordinator&) = delete;
 
     std::uint64_t Request(const GeometryModel& model, const GeometryValidation& validation,
-        std::string input_key);
+        double agent_radius, std::string input_key);
     [[nodiscard]] std::optional<BakeCompletion> TakeCompletion();
     [[nodiscard]] bool IsRunning() const;
 
@@ -35,6 +35,7 @@ private:
         std::string input_key;
         GeometryModel model;
         GeometryValidation validation;
+        double agent_radius{};
     };
     void Run();
     mutable std::mutex mutex;

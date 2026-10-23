@@ -98,6 +98,7 @@ if(BUILD_TESTING)
         src/validation/GeometryValidator.cpp
     )
     target_include_directories(ConstrainedDelaunayTests PRIVATE src external)
+    target_link_libraries(ConstrainedDelaunayTests PRIVATE Clipper2)
     add_test(NAME ConstrainedDelaunayTests COMMAND ConstrainedDelaunayTests)
 endif()
 
