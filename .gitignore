@@ -3,6 +3,7 @@
 # ==============================================================================
 
 .codegraph/
+.codebase-memory/
 
 # --- Compiled Binaries & Libraries ---
 *.exe
