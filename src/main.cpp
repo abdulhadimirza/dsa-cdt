@@ -3,6 +3,7 @@
 #include "rlImGui.h"
 
 #include "app/CameraController.hpp"
+#include "app/NavmeshBakeCoordinator.hpp"
 #include "cdt/ConstrainedDelaunay.hpp"
 #include "editor/EditorController.hpp"
 #include "model/GeometryModel.hpp"
@@ -57,12 +58,14 @@ int main() {
     cdt::EditorController editor;
     cdt::SceneRenderer renderer;
     cdt::GeometryValidator validator;
-    cdt::ConstrainedDelaunay triangulator;
+    cdt::NavmeshBakeCoordinator bake_coordinator;
     std::optional<cdt::ConstrainedMesh> baked_mesh;
     bool bake_attempted = false;
     cdt::GenerationStatus last_bake_status = cdt::GenerationStatus::Failed;
     std::string baked_input_key;
     std::string pending_input_key;
+    std::string auto_attempted_key;
+    std::uint64_t latest_bake_generation = 0;
     double pending_since = 0.0;
     cdt::ControlPanel control_panel;
 
@@ -86,6 +89,19 @@ int main() {
         const cdt::GeometryValidation validation = validator.Validate(geometry);
         const std::string input_key = TriangulationInputKey(geometry, validation);
 
+        if (auto completion = bake_coordinator.TakeCompletion()) {
+            if (completion->generation == latest_bake_generation && completion->input_key == input_key) {
+                bake_attempted = true;
+                last_bake_status = completion->result.status;
+                if (completion->result.status == cdt::GenerationStatus::Success) {
+                    baked_mesh = std::move(completion->result.mesh);
+                    baked_input_key = completion->input_key;
+                } else if (completion->result.status == cdt::GenerationStatus::Failed) {
+                    std::cerr << "Navmesh generation failed: " << completion->result.message << '\n';
+                }
+            }
+        }
+
         BeginDrawing();
         ClearBackground(background_color);
         BeginMode2D(camera.GetCamera());
@@ -98,19 +114,16 @@ int main() {
         const cdt::ControlRequests requests = control_panel.Draw(
             camera.GetCamera(), mouse_screen, mouse_world, geometry, editor.State(),
             baked_mesh.has_value(), bake_attempted, last_bake_status,
-            baked_mesh.has_value() && input_key != baked_input_key);
+            baked_mesh.has_value() && input_key != baked_input_key, bake_coordinator.IsRunning());
         rlImGuiEnd();
 
         if (requests.reset_view) camera.ResetView(Vector2{0.0f, 0.0f});
         if (requests.selected_tool) editor.SetTool(*requests.selected_tool);
         if (requests.selected_edit_behavior) editor.SetEditBehavior(*requests.selected_edit_behavior);
         if (requests.bake_navmesh) {
-            const cdt::GenerationResult result = triangulator.Generate(geometry, validation);
             bake_attempted = true;
-            last_bake_status = result.status;
-            if (result.status == cdt::GenerationStatus::Success) { baked_mesh = result.mesh; baked_input_key = input_key; }
-            else if (result.status == cdt::GenerationStatus::Failed)
-                std::cerr << "Navmesh generation failed: " << result.message << '\n';
+            pending_input_key.clear();
+            latest_bake_generation = bake_coordinator.Request(geometry, validation, input_key);
         }
         if (requests.delete_navmesh) baked_mesh.reset();
         if (requests.clear_geometry) {
@@ -118,15 +131,13 @@ int main() {
             editor.ClearInteraction();
         }
 
-        if (control_panel.AutoBakeNavmesh() && baked_mesh && input_key != baked_input_key) {
+        if (control_panel.AutoBakeNavmesh() && (baked_mesh || bake_coordinator.IsRunning()) &&
+            input_key != baked_input_key && input_key != auto_attempted_key) {
             if (pending_input_key != input_key) { pending_input_key = input_key; pending_since = GetTime(); }
-            else if (GetTime() - pending_since >= 0.25) {
-                const cdt::GenerationResult result = triangulator.Generate(geometry, validation);
+            else if (GetTime() - pending_since >= 0.0) {
+                latest_bake_generation = bake_coordinator.Request(geometry, validation, input_key);
+                auto_attempted_key = input_key;
                 bake_attempted = true;
-                last_bake_status = result.status;
-                if (result.status == cdt::GenerationStatus::Success) { baked_mesh = result.mesh; baked_input_key = input_key; }
-                else if (result.status == cdt::GenerationStatus::Failed)
-                    std::cerr << "Automatic navmesh generation failed: " << result.message << '\n';
                 pending_input_key.clear();
             }
         } else pending_input_key.clear();

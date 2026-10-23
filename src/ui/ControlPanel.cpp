@@ -6,7 +6,7 @@ namespace cdt {
 
 ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
     Vector2d mouse_world, const GeometryModel& model, const EditorState& editor,
-    bool has_baked_mesh, bool bake_attempted, GenerationStatus last_bake_status, bool mesh_out_of_date) {
+    bool has_baked_mesh, bool bake_attempted, GenerationStatus last_bake_status, bool mesh_out_of_date, bool bake_running) {
     ControlRequests requests{};
 
     ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
@@ -74,6 +74,7 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
         requests.bake_navmesh = ImGui::Button("Bake Navmesh", ImVec2(-1.0f, 24.0f));
         requests.delete_navmesh = ImGui::Button("Delete Navmesh", ImVec2(-1.0f, 24.0f));
         ImGui::Text("Stored mesh: %s", has_baked_mesh ? "yes" : "no");
+        if (bake_running) ImGui::Text("Bake: running / queued");
         if (mesh_out_of_date) ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Mesh is out of date");
         if (!bake_attempted) ImGui::TextDisabled("Last bake: not attempted");
         else switch (last_bake_status) {

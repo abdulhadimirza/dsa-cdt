@@ -25,7 +25,7 @@ class ControlPanel {
 public:
     [[nodiscard]] ControlRequests Draw(const Camera2D& camera, Vector2 mouse_screen,
         Vector2d mouse_world, const GeometryModel& model, const EditorState& editor,
-        bool has_baked_mesh, bool bake_attempted, GenerationStatus last_bake_status, bool mesh_out_of_date);
+        bool has_baked_mesh, bool bake_attempted, GenerationStatus last_bake_status, bool mesh_out_of_date, bool bake_running);
     [[nodiscard]] const RenderOptions& Options() const noexcept { return options; }
     [[nodiscard]] bool AutoBakeNavmesh() const noexcept { return auto_bake_navmesh; }
 

@@ -40,6 +40,7 @@ FetchContent_MakeAvailable(rlimgui)
 # Define our executable target
 add_executable(${PROJECT_NAME} 
     src/main.cpp
+    src/app/NavmeshBakeCoordinator.cpp
     src/cdt/ConstrainedDelaunay.cpp
     src/app/CameraController.cpp
     src/model/GeometryModel.cpp
