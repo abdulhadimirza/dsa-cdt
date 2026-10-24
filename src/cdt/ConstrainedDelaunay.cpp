@@ -519,19 +519,23 @@ bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Ve
     return true;
 }
 
-// Build the convex hull in counterclockwise order, retaining every input point on its boundary.
-// The monotone-chain pass finds strict corners; points on each hull edge are then inserted in edge order.
+// Find the outside outline of all points, going counterclockwise around it.
+// Points inside the outline are not returned. Points lying along a straight outside edge are kept.
 bool BuildConvexHullBoundary(const std::vector<Vector2d>& points, std::vector<std::size_t>& hull,
     std::string& failureReason) {
+    // Start with an empty result so a failed call cannot leave old hull points behind.
     hull.clear();
     if (points.size() < 3) {
         failureReason = "fewer than three input points";
         return false;
     }
 
+    // Sort point numbers, not the points themselves. This puts every point in a known
+    // left-to-right order so the two scans below can trace the bottom and top outlines.
     std::vector<std::size_t> sorted(points.size());
     for (std::size_t i = 0; i < sorted.size(); ++i) sorted[i] = i;
     std::sort(sorted.begin(), sorted.end(), [&](std::size_t a, std::size_t b) {
+        // Compare x first; when x matches, compare y. The point number breaks any final tie.
         if (points[a].x != points[b].x) return points[a].x < points[b].x;
         if (points[a].y != points[b].y) return points[a].y < points[b].y;
         return a < b;
@@ -545,11 +549,15 @@ bool BuildConvexHullBoundary(const std::vector<Vector2d>& points, std::vector<st
         }
     }
 
+    // The left-to-right scan builds the bottom edge. The right-to-left scan builds the top.
+    // Each list holds the point numbers that currently make up that part of the outline.
     std::vector<std::size_t> lower, upper;
     lower.reserve(sorted.size());
     upper.reserve(sorted.size());
     for (std::size_t index : sorted) {
         while (lower.size() >= 2 &&
+            // Check the last two kept points and this new point. A right turn or a straight
+            // line means the middle point is not a bottom-outline corner, so remove it.
             Orient(points[lower[lower.size() - 2]], points[lower.back()], points[index]) <= 0.0)
             lower.pop_back();
         lower.push_back(index);
@@ -557,10 +565,13 @@ bool BuildConvexHullBoundary(const std::vector<Vector2d>& points, std::vector<st
     for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
         const std::size_t index = *it;
         while (upper.size() >= 2 &&
+            // Do the same check while scanning from right to left to build the top outline.
             Orient(points[upper[upper.size() - 2]], points[upper.back()], points[index]) <= 0.0)
             upper.pop_back();
         upper.push_back(index);
     }
+    // Each scan ends at a point already present at the start of the other scan.
+    // Remove those duplicate ends, then join the two lists into one trip around the outline.
     lower.pop_back();
     upper.pop_back();
     lower.insert(lower.end(), upper.begin(), upper.end());
@@ -569,26 +580,37 @@ bool BuildConvexHullBoundary(const std::vector<Vector2d>& points, std::vector<st
         return false;
     }
 
+    // The scans above keep only the corners. Now add back input points that lie between
+    // two corners on a straight outside edge, so those boundary vertices are not lost.
     hull.reserve(points.size());
     for (std::size_t edgeIndex = 0; edgeIndex < lower.size(); ++edgeIndex) {
         const std::size_t first = lower[edgeIndex];
         const std::size_t second = lower[(edgeIndex + 1) % lower.size()];
         hull.push_back(first);
 
+        // Find all input points between these two edge ends. They are found in input order,
+        // which may go back and forth along the edge, so collect them before ordering them.
         std::vector<std::size_t> edgePoints;
         for (std::size_t candidate = 0; candidate < points.size(); ++candidate) {
             if (candidate != first && candidate != second &&
                 OnSegment(points[first], points[second], points[candidate]))
                 edgePoints.push_back(candidate);
         }
+        // Pick the coordinate that changes more along the edge. Ordering by that coordinate
+        // gives a clear along-edge order (including for nearly vertical or horizontal edges).
         const Vector2d direction = points[second] - points[first];
         const bool sortByX = std::abs(direction.x) >= std::abs(direction.y);
+        // Match the edge's travel direction: sort small-to-large if this coordinate increases,
+        // and large-to-small if it decreases from first to second.
         const bool ascending = sortByX ? direction.x > 0.0 : direction.y > 0.0;
         std::sort(edgePoints.begin(), edgePoints.end(), [&](std::size_t a, std::size_t b) {
+            // Compare the chosen coordinate so the points appear in first-to-second order.
             const double coordinateA = sortByX ? points[a].x : points[a].y;
             const double coordinateB = sortByX ? points[b].x : points[b].y;
             return ascending ? coordinateA < coordinateB : coordinateA > coordinateB;
         });
+        // Append them after this edge's first corner. The next loop pass appends the next corner,
+        // keeping the complete hull boundary in order without changing its direction.
         hull.insert(hull.end(), edgePoints.begin(), edgePoints.end());
     }
     return true;
