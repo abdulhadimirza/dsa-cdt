@@ -109,6 +109,11 @@ struct ConstraintRecoveryStats {
     std::size_t crossingEdgesSeen{};
     std::size_t flipAttempts{};
     std::size_t successfulFlips{};
+    std::size_t progressFlips{};
+    std::size_t nonProgressFlips{};
+    std::size_t maximumNonProgressFlipStreak{};
+    bool earlyCavityAttempted{};
+    bool earlyCavityRecovered{};
     std::size_t cavityAttempts{};
     std::size_t cavityEdgeEntriesScanned{};
     std::size_t cavityCrossedEdges{};
@@ -148,6 +153,10 @@ struct CdtDiagnostics {
     std::size_t constraintCrossingEdgesSeen{};
     std::size_t constraintFlipAttempts{};
     std::size_t constraintSuccessfulFlips{};
+    std::size_t constraintProgressFlips{};
+    std::size_t constraintNonProgressFlips{};
+    std::size_t earlyCavityAttempts{};
+    std::size_t earlyCavitySuccesses{};
     std::size_t cavityFallbackAttempts{};
     double bowyerWatsonMs{};
     double hullBuildMs{};
@@ -546,6 +555,28 @@ bool RecoverByCavity(const Edge& constraint, TriangleMesh& triangleMesh, const s
 
 bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Vector2d>& points);
 
+/// Describe the valid replacement triangles for flipping one shared edge without mutating the mesh.
+/// @return True when the edge forms a convex quadrilateral and its replacement edge is not already present.
+bool GetFlippedTriangles(const TriangleMesh& triangleMesh, const Edge& edge,
+    const std::vector<Vector2d>& points, Triangle& first, Triangle& second, Edge& replacementEdge) {
+    const auto edgeIterator = triangleMesh.trianglesByEdge.find(edge);
+    if (edgeIterator == triangleMesh.trianglesByEdge.end() || edgeIterator->second.triangleCount != 2) return false;
+    const auto adjacentTriangles = edgeIterator->second.triangles;
+    const TriangleIndex firstTriangleIndex = adjacentTriangles[0].triangleIndex;
+    const TriangleIndex secondTriangleIndex = adjacentTriangles[1].triangleIndex;
+    const std::size_t c = triangleMesh.triangles[firstTriangleIndex].vertexIndices[adjacentTriangles[0].oppositeVertexSlot];
+    const std::size_t d = triangleMesh.triangles[secondTriangleIndex].vertexIndices[adjacentTriangles[1].oppositeVertexSlot];
+    const std::size_t a = edge[0], b = edge[1];
+    if (c == d || !ProperlyIntersects(points[a], points[b], points[c], points[d])) return false;
+
+    replacementEdge = MakeEdge(c, d);
+    if (triangleMesh.trianglesByEdge.contains(replacementEdge)) return false;
+    first = Ccw({c, d, a}, points);
+    second = Ccw({d, c, b}, points);
+    return Orient(points[first[0]], points[first[1]], points[first[2]]) != 0.0 &&
+        Orient(points[second[0]], points[second[1]], points[second[2]]) != 0.0;
+}
+
 /// Try to recover one constraint segment by flipping crossing edges, then use cavity recovery if needed.
 /// @param constraint Endpoint indices of the single segment to insert.
 /// @param triangleMesh Mesh that may be changed by successful flips or cavity filling.
@@ -558,6 +589,9 @@ bool RecoverConstraintSingle(const Edge& constraint, TriangleMesh& triangleMesh,
     ConstraintRecoveryStats* diagnostics) {
     const auto started = diagnostics ? DiagnosticClock::now() : DiagnosticClock::time_point{};
     const std::size_t iterationLimit = triangleMesh.trianglesByEdge.size() * triangleMesh.trianglesByEdge.size() + 32;
+    constexpr std::size_t maximumNonProgressFlipStreak = 8;
+    std::size_t nonProgressFlipStreak = 0;
+    bool earlyCavityAttempted = false;
     if (diagnostics) diagnostics->iterationLimit = iterationLimit;
     const auto finish = [&](bool recovered, const char* outcome) {
         if (diagnostics) {
@@ -584,21 +618,58 @@ bool RecoverConstraintSingle(const Edge& constraint, TriangleMesh& triangleMesh,
         }
         if (diagnostics) diagnostics->crossingEdgesSeen += crossingEdges.size();
         bool flipped = false;
-        // Try crossing edges one at a time. A successful flip changes the mesh, so start the search again.
+        bool madeProgress = false;
+        std::vector<Edge> progressCandidates;
+        std::vector<Edge> nonProgressCandidates;
         for (const Edge& edge : crossingEdges) if (!fixedConstraintEdges.contains(edge)) {
-            if (diagnostics) ++diagnostics->flipAttempts;
-            if (FlipEdge(triangleMesh, edge, points)) {
-                if (diagnostics) ++diagnostics->successfulFlips;
-                flipped = true;
-                break;
-            }
+            Triangle first{}, second{};
+            Edge replacementEdge{};
+            if (!GetFlippedTriangles(triangleMesh, edge, points, first, second, replacementEdge)) continue;
+            const bool replacementStillCrosses = ProperlyIntersects(
+                points[constraint[0]], points[constraint[1]],
+                points[replacementEdge[0]], points[replacementEdge[1]]);
+            (replacementStillCrosses ? nonProgressCandidates : progressCandidates).push_back(edge);
         }
+        // Prefer a flip that removes a crossing. If none exists, try neutral flips so
+        // they can expose a progressing flip, but bound how long that sequence can run.
+        const auto tryFlips = [&](const std::vector<Edge>& candidates, bool candidateMakesProgress) {
+            for (const Edge& edge : candidates) {
+                if (diagnostics) ++diagnostics->flipAttempts;
+                if (!FlipEdge(triangleMesh, edge, points)) continue;
+                if (diagnostics) ++diagnostics->successfulFlips;
+                madeProgress = candidateMakesProgress;
+                flipped = true;
+                return;
+            }
+        };
+        tryFlips(progressCandidates, true);
+        if (!flipped) tryFlips(nonProgressCandidates, false);
         if (!flipped) {
             if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges, diagnostics)) {
                 fixedConstraintEdges.insert(constraint);
                 return finish(true, "recovered-by-cavity");
             }
             return finish(false, "cavity-failed-no-flippable-edge");
+        }
+        if (madeProgress) {
+            nonProgressFlipStreak = 0;
+            if (diagnostics) ++diagnostics->progressFlips;
+        } else {
+            ++nonProgressFlipStreak;
+            if (diagnostics) {
+                ++diagnostics->nonProgressFlips;
+                diagnostics->maximumNonProgressFlipStreak =
+                    std::max(diagnostics->maximumNonProgressFlipStreak, nonProgressFlipStreak);
+            }
+        }
+        if (!earlyCavityAttempted && nonProgressFlipStreak >= maximumNonProgressFlipStreak) {
+            earlyCavityAttempted = true;
+            if (diagnostics) diagnostics->earlyCavityAttempted = true;
+            if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges, diagnostics)) {
+                fixedConstraintEdges.insert(constraint);
+                if (diagnostics) diagnostics->earlyCavityRecovered = true;
+                return finish(true, "recovered-by-early-cavity");
+            }
         }
     }
     if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges, diagnostics)) {
@@ -614,23 +685,14 @@ bool RecoverConstraintSingle(const Edge& constraint, TriangleMesh& triangleMesh,
 /// @param points Coordinates for all vertex indices.
 /// @return True if the replacement was valid and added; false if the edge cannot be flipped safely.
 bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Vector2d>& points) {
-    // The edge table tells us which two triangles touch this edge. A boundary edge has only one and cannot flip.
-    auto edgeIterator = triangleMesh.trianglesByEdge.find(edge);
-    if (edgeIterator == triangleMesh.trianglesByEdge.end() || edgeIterator->second.triangleCount != 2) return false;
+    Triangle first{}, second{};
+    Edge replacementEdge{};
+    if (!GetFlippedTriangles(triangleMesh, edge, points, first, second, replacementEdge)) return false;
+    // Remove the old pair, then register the replacement pair and all local links.
+    const auto edgeIterator = triangleMesh.trianglesByEdge.find(edge);
     const auto adjacentTriangles = edgeIterator->second.triangles;
     const TriangleIndex firstTriangleIndex = adjacentTriangles[0].triangleIndex;
     const TriangleIndex secondTriangleIndex = adjacentTriangles[1].triangleIndex;
-    const std::size_t c = triangleMesh.triangles[firstTriangleIndex].vertexIndices[adjacentTriangles[0].oppositeVertexSlot];
-    const std::size_t d = triangleMesh.triangles[secondTriangleIndex].vertexIndices[adjacentTriangles[1].oppositeVertexSlot];
-    // The shared edge is A--B; C and D are the opposite corners of the two touching triangles.
-    const std::size_t a = edge[0], b = edge[1];
-    // C and D must lie across opposite sides of A--B. Otherwise the four corners do not make a flippable shape.
-    if (c == d || !ProperlyIntersects(points[a], points[b], points[c], points[d])) return false;
-    // The other diagonal is C--D. These two triangles use it; Ccw makes their winding consistent.
-    Triangle first = Ccw({c, d, a}, points), second = Ccw({d, c, b}, points);
-    if (Orient(points[first[0]], points[first[1]], points[first[2]]) == 0.0 ||
-        Orient(points[second[0]], points[second[1]], points[second[2]]) == 0.0) return false;
-    // Remove the old pair, then register the replacement pair and all local links.
     RemoveTriangle(triangleMesh, firstTriangleIndex); RemoveTriangle(triangleMesh, secondTriangleIndex);
     if (!AddTriangle(triangleMesh, first) || !AddTriangle(triangleMesh, second)) { triangleMesh.hasValidTopology = false; return false; }
     return true;
@@ -923,6 +985,10 @@ bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
             diagnostics->constraintCrossingEdgesSeen += segmentDiagnostics.crossingEdgesSeen;
             diagnostics->constraintFlipAttempts += segmentDiagnostics.flipAttempts;
             diagnostics->constraintSuccessfulFlips += segmentDiagnostics.successfulFlips;
+            diagnostics->constraintProgressFlips += segmentDiagnostics.progressFlips;
+            diagnostics->constraintNonProgressFlips += segmentDiagnostics.nonProgressFlips;
+            diagnostics->earlyCavityAttempts += segmentDiagnostics.earlyCavityAttempted ? 1 : 0;
+            diagnostics->earlyCavitySuccesses += segmentDiagnostics.earlyCavityRecovered ? 1 : 0;
             diagnostics->cavityFallbackAttempts += segmentDiagnostics.cavityAttempts;
             if (recovered) ++diagnostics->recoveredSegments;
             diagnostics->recoverySegments.push_back(std::move(segmentDiagnostics));
@@ -1111,6 +1177,10 @@ void PrintCdtRegionDiagnostics(std::size_t regionIndex, const InputGeometry& inp
         << " crossing_edges_seen=" << diagnostics.constraintCrossingEdgesSeen
         << " flip_attempts=" << diagnostics.constraintFlipAttempts
         << " successful_flips=" << diagnostics.constraintSuccessfulFlips
+        << " progress_flips=" << diagnostics.constraintProgressFlips
+        << " non_progress_flips=" << diagnostics.constraintNonProgressFlips
+        << " early_cavity_attempts=" << diagnostics.earlyCavityAttempts
+        << " early_cavity_successes=" << diagnostics.earlyCavitySuccesses
         << " cavity_fallback_attempts=" << diagnostics.cavityFallbackAttempts << '\n';
 
     for (const LegalizationStats& legalization : diagnostics.legalizations) {
@@ -1174,6 +1244,11 @@ void PrintCdtRegionDiagnostics(std::size_t regionIndex, const InputGeometry& inp
             << " crossing_edges_seen=" << segment.crossingEdgesSeen
             << " flip_attempts=" << segment.flipAttempts
             << " successful_flips=" << segment.successfulFlips
+            << " progress_flips=" << segment.progressFlips
+            << " non_progress_flips=" << segment.nonProgressFlips
+            << " max_non_progress_streak=" << segment.maximumNonProgressFlipStreak
+            << " early_cavity_attempted=" << (segment.earlyCavityAttempted ? "true" : "false")
+            << " early_cavity_recovered=" << (segment.earlyCavityRecovered ? "true" : "false")
             << " cavity_attempts=" << segment.cavityAttempts
             << " cavity_ms=" << segment.cavityMs
             << " cavity_edge_entries_scanned=" << segment.cavityEdgeEntriesScanned

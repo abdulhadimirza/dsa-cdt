@@ -39,6 +39,14 @@ GeometryModel MakeNearParallelFixture(bool includeCollinearBorderPoint = false) 
     return model;
 }
 
+GeometryModel MakeAcuteCornerNearBorderFixture() {
+    GeometryModel model;
+    AddLoop(model, {{0, 0}, {100, 0}, {100, 100}, {0, 100}}, EdgeType::Border);
+    // The obstacle tip is about 22 degrees wide and leaves a narrow offset gap at the border.
+    AddLoop(model, {{10, 35}, {89, 50}, {10, 65}}, EdgeType::Obstacle);
+    return model;
+}
+
 void VerifyGenerated(const GeometryModel& model, double radius) {
     const GeometryValidationReport report = GeometryValidator{}.Validate(model);
     Require(report.validated_navmesh_input.has_value(), "Fixture did not pass geometry validation");
@@ -90,6 +98,7 @@ int main() {
     try {
         RunFixture("near-parallel narrow gap (radius 1.99)", MakeNearParallelFixture(), 1.99);
         RunFixture("wider-gap control (radius 1.5)", MakeNearParallelFixture(), 1.5);
+        RunFixture("acute obstacle corner near border (radius 1.5)", MakeAcuteCornerNearBorderFixture(), 1.5);
         // This border edge contains an existing collinear vertex, exercising the
         // pipeline's contour normalization and constraint recovery around it.
         RunFixture("collinear border vertex (radius 1.5)", MakeNearParallelFixture(true), 1.5);
