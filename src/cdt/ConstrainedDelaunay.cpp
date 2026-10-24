@@ -2,16 +2,23 @@
 #include "core/GeometryPredicates.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <deque>
 #include <functional>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <queue>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
+#include <string_view>
+#include <vector>
 
 
 namespace cdt {
@@ -52,6 +59,109 @@ using detail::StoredTriangle;
 using detail::TriangleOnEdge;
 using detail::TrianglesOnEdge;
 using detail::TriangleMesh;
+
+using DiagnosticClock = std::chrono::steady_clock;
+
+bool NavmeshDiagnosticsEnabled() {
+    const char* value = std::getenv("CDT_NAVMESH_DIAGNOSTICS");
+    return value && value[0] != '\0' && std::string_view(value) != "0";
+}
+
+double ElapsedMilliseconds(DiagnosticClock::time_point start) {
+    return std::chrono::duration<double, std::milli>(DiagnosticClock::now() - start).count();
+}
+
+struct BowyerInsertionStats {
+    std::size_t pointIndex{};
+    Vector2d point{};
+    std::size_t storedTriangleSlots{};
+    std::size_t liveTrianglesScanned{};
+    std::size_t cavityTriangles{};
+    std::size_t boundaryEdges{};
+    std::size_t trianglesAdded{};
+    double elapsedMs{};
+};
+
+struct LegalizationStats {
+    std::string stage;
+    std::size_t initialQueueSize{};
+    std::size_t checkedEdges{};
+    std::size_t successfulFlips{};
+    std::size_t maximumQueueSize{};
+    std::size_t iterationLimit{};
+    bool reachedLimit{};
+    double elapsedMs{};
+};
+
+struct ConstraintRecoveryStats {
+    Edge originalConstraint{};
+    Edge segment{};
+    Vector2d segmentStart{};
+    Vector2d segmentEnd{};
+    std::size_t constraintIndex{};
+    std::size_t segmentIndex{};
+    std::size_t segmentCount{};
+    std::size_t pointChecks{};
+    std::size_t iterations{};
+    std::size_t iterationLimit{};
+    std::size_t edgeEntriesScanned{};
+    std::size_t intersectionTests{};
+    std::size_t crossingEdgesSeen{};
+    std::size_t flipAttempts{};
+    std::size_t successfulFlips{};
+    std::size_t cavityAttempts{};
+    std::size_t cavityEdgeEntriesScanned{};
+    std::size_t cavityCrossedEdges{};
+    std::size_t cavityRemovedTriangles{};
+    std::size_t cavityBoundaryVertices{};
+    std::size_t cavityFillTriangles{};
+    double cavityPathMs{};
+    double cavityMs{};
+    std::string cavityFailure;
+    std::string outcome;
+    double elapsedMs{};
+};
+
+struct CdtDiagnostics {
+    explicit CdtDiagnostics(bool isEnabled) : enabled(isEnabled) {}
+
+    bool enabled{};
+    std::size_t hullVertices{};
+    std::size_t interiorPointCandidates{};
+    std::size_t pointsWithoutCavity{};
+    std::size_t storedTriangleSlotsScanned{};
+    std::size_t liveTrianglesScanned{};
+    std::size_t circumcircleTests{};
+    std::size_t cavityTrianglesRemoved{};
+    std::size_t cavityBoundaryEdges{};
+    std::size_t pointTrianglesAdded{};
+    std::size_t maximumStoredSlotsAtScan{};
+    std::size_t finalTriangleSlots{};
+    std::size_t finalLiveTriangles{};
+    std::size_t originalConstraintCount{};
+    std::size_t constraintPointChecks{};
+    std::size_t constraintSegments{};
+    std::size_t recoveredSegments{};
+    std::size_t constraintRecoveryIterationCount{};
+    std::size_t constraintEdgeEntriesScanned{};
+    std::size_t constraintIntersectionTests{};
+    std::size_t constraintCrossingEdgesSeen{};
+    std::size_t constraintFlipAttempts{};
+    std::size_t constraintSuccessfulFlips{};
+    std::size_t cavityFallbackAttempts{};
+    double bowyerWatsonMs{};
+    double hullBuildMs{};
+    double hullTriangulationMs{};
+    double seedAdjacencyMs{};
+    double constraintRecoveryMs{};
+    double constrainedBuildMs{};
+    std::string bowyerFailure;
+    std::string constrainedBuildFailure;
+    std::vector<BowyerInsertionStats> slowInsertions;
+    std::vector<LegalizationStats> legalizations;
+    std::vector<ConstraintRecoveryStats> recoverySegments;
+};
+
 /// Make an edge key that is the same whichever endpoint order the caller provides.
 /// @param firstVertexIndex Index of one endpoint in the shared vertex list.
 /// @param secondVertexIndex Index of the other endpoint.
@@ -324,25 +434,42 @@ bool TriangulateSimplePolygon(std::vector<std::size_t> polygon, const std::vecto
 /// @return True when a valid replacement mesh contains this edge and all protected edges.
 /// @note The new mesh is built as a copy first, so a failed attempt leaves the original mesh intact.
 bool RecoverByCavity(const Edge& constraint, TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
-    const std::set<Edge>& fixedConstraintEdges) {
+    const std::set<Edge>& fixedConstraintEdges, ConstraintRecoveryStats* diagnostics) {
+    const auto started = diagnostics ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+    if (diagnostics) ++diagnostics->cavityAttempts;
+    const auto finish = [&](bool recovered, const char* failure) {
+        if (diagnostics) {
+            diagnostics->cavityMs += ElapsedMilliseconds(started);
+            if (!recovered) diagnostics->cavityFailure = failure;
+        }
+        return recovered;
+    };
+
     // Find every current mesh edge that the requested straight segment passes through.
     std::vector<Edge> crossedEdges;
     for (const auto& [edge, uses] : triangleMesh.trianglesByEdge) {
         (void)uses;
+        if (diagnostics) ++diagnostics->cavityEdgeEntriesScanned;
         if (ProperlyIntersects(points[constraint[0]], points[constraint[1]], points[edge[0]], points[edge[1]])) {
-            if (fixedConstraintEdges.contains(edge)) return false;
+            if (fixedConstraintEdges.contains(edge)) {
+                if (diagnostics) ++diagnostics->cavityCrossedEdges;
+                return finish(false, "crosses-fixed-constraint");
+            }
             crossedEdges.push_back(edge);
         }
     }
-    if (crossedEdges.empty()) return false;
+    if (diagnostics) diagnostics->cavityCrossedEdges += crossedEdges.size();
+    if (crossedEdges.empty()) return finish(false, "no-crossed-edges");
 
     // Each crossed edge belongs to two triangles. Removing those triangles makes a strip around the segment.
     std::set<TriangleIndex> removed;
     for (const Edge& edge : crossedEdges) {
         const auto it = triangleMesh.trianglesByEdge.find(edge);
-        if (it == triangleMesh.trianglesByEdge.end() || it->second.triangleCount != 2) return false;
+        if (it == triangleMesh.trianglesByEdge.end() || it->second.triangleCount != 2)
+            return finish(false, "crossed-edge-is-not-interior");
         for (std::size_t i = 0; i < 2; ++i) removed.insert(it->second.triangles[i].triangleIndex);
     }
+    if (diagnostics) diagnostics->cavityRemovedTriangles += removed.size();
 
     // Count edges around the removed triangles: once means on the strip's outside edge;
     // twice means shared inside the strip and therefore not part of its boundary.
@@ -356,7 +483,8 @@ bool RecoverByCavity(const Edge& constraint, TriangleMesh& triangleMesh, const s
     for (const auto& [edge, count] : counts) if (count == 1) {
         graph[edge[0]].push_back(edge[1]); graph[edge[1]].push_back(edge[0]);
     }
-    if (graph[constraint[0]].size() != 2 || graph[constraint[1]].size() != 2) return false;
+    if (graph[constraint[0]].size() != 2 || graph[constraint[1]].size() != 2)
+        return finish(false, "strip-boundary-endpoint-degree");
 
     /// Walk one side of the strip boundary, starting from one neighbor of the first constraint endpoint.
     /// @param firstNeighbor First boundary vertex after `constraint[0]`.
@@ -378,27 +506,42 @@ bool RecoverByCavity(const Edge& constraint, TriangleMesh& triangleMesh, const s
         }
     };
     auto first = makePath(graph[constraint[0]][0]);
-    if (first.empty()) return false;
+    if (first.empty()) return finish(false, "first-strip-boundary-path");
     auto second = makePath(graph[constraint[0]][1]);
-    if (second.empty() || first == second) return false;
+    if (diagnostics) diagnostics->cavityBoundaryVertices += first.size() + second.size();
+    if (second.empty() || first == second) return finish(false, "second-strip-boundary-path");
 
     // The requested segment divides the removed strip into two polygons; triangulate each side separately.
     std::vector<Triangle> fill;
-    if (!TriangulateSimplePolygon(std::move(first), points, fill)) return false;
-    if (!TriangulateSimplePolygon(std::move(second), points, fill)) return false;
+    const auto pathTriangulationStarted = diagnostics ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+    if (!TriangulateSimplePolygon(std::move(first), points, fill)) {
+        if (diagnostics) diagnostics->cavityPathMs += ElapsedMilliseconds(pathTriangulationStarted);
+        return finish(false, "first-strip-polygon-triangulation");
+    }
+    if (!TriangulateSimplePolygon(std::move(second), points, fill)) {
+        if (diagnostics) diagnostics->cavityPathMs += ElapsedMilliseconds(pathTriangulationStarted);
+        return finish(false, "second-strip-polygon-triangulation");
+    }
+    if (diagnostics) {
+        diagnostics->cavityPathMs += ElapsedMilliseconds(pathTriangulationStarted);
+        diagnostics->cavityFillTriangles += fill.size();
+    }
     // Work on a copy so any failed topology check below cannot damage the current mesh.
     TriangleMesh candidate = triangleMesh;
     for (TriangleIndex index : removed) RemoveTriangle(candidate, index);
-    if (!candidate.hasValidTopology) return false;
+    if (!candidate.hasValidTopology) return finish(false, "topology-invalid-after-removal");
     for (const Triangle& t : fill) {
-        if (Orient(points[t[0]], points[t[1]], points[t[2]]) == 0.0) return false;
-        if (!AddTriangle(candidate, t)) return false;
+        if (Orient(points[t[0]], points[t[1]], points[t[2]]) == 0.0)
+            return finish(false, "degenerate-fill-triangle");
+        if (!AddTriangle(candidate, t)) return finish(false, "fill-triangle-topology");
     }
     // Publish the copy only after confirming the requested and previously fixed edges all survived.
-    if (!candidate.hasValidTopology || !HasEdge(candidate, constraint)) return false;
-    for (const Edge& fixed : fixedConstraintEdges) if (!HasEdge(candidate, fixed)) return false;
+    if (!candidate.hasValidTopology || !HasEdge(candidate, constraint))
+        return finish(false, "recovered-edge-missing-after-fill");
+    for (const Edge& fixed : fixedConstraintEdges)
+        if (!HasEdge(candidate, fixed)) return finish(false, "fixed-constraint-missing-after-fill");
     triangleMesh = std::move(candidate);
-    return true;
+    return finish(true, "");
 }
 
 bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Vector2d>& points);
@@ -411,29 +554,58 @@ bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Ve
 /// @return True when the segment exists and has been added to the protected-edge set.
 /// @note The bounded flip loop prevents recovery from running forever; cavity recovery is the fallback.
 bool RecoverConstraintSingle(const Edge& constraint, TriangleMesh& triangleMesh,
-    const std::vector<Vector2d>& points, std::set<Edge>& fixedConstraintEdges) {
+    const std::vector<Vector2d>& points, std::set<Edge>& fixedConstraintEdges,
+    ConstraintRecoveryStats* diagnostics) {
+    const auto started = diagnostics ? DiagnosticClock::now() : DiagnosticClock::time_point{};
     const std::size_t iterationLimit = triangleMesh.trianglesByEdge.size() * triangleMesh.trianglesByEdge.size() + 32;
+    if (diagnostics) diagnostics->iterationLimit = iterationLimit;
+    const auto finish = [&](bool recovered, const char* outcome) {
+        if (diagnostics) {
+            diagnostics->outcome = outcome;
+            diagnostics->elapsedMs = ElapsedMilliseconds(started);
+        }
+        return recovered;
+    };
+
     for (std::size_t iteration = 0; iteration < iterationLimit; ++iteration) {
-        if (HasEdge(triangleMesh, constraint)) { fixedConstraintEdges.insert(constraint); return true; }
+        if (diagnostics) ++diagnostics->iterations;
+        if (HasEdge(triangleMesh, constraint)) {
+            fixedConstraintEdges.insert(constraint);
+            return finish(true, diagnostics && diagnostics->successfulFlips > 0 ? "recovered-by-flips" : "already-present");
+        }
         std::vector<Edge> crossingEdges;
         for (const auto& [edge, trianglesOnEdge] : triangleMesh.trianglesByEdge) {
             (void)trianglesOnEdge;
+            if (diagnostics) {
+                ++diagnostics->edgeEntriesScanned;
+                if (edge != constraint) ++diagnostics->intersectionTests;
+            }
             if (edge != constraint && ProperlyIntersects(points[constraint[0]], points[constraint[1]], points[edge[0]], points[edge[1]])) crossingEdges.push_back(edge);
         }
+        if (diagnostics) diagnostics->crossingEdgesSeen += crossingEdges.size();
         bool flipped = false;
         // Try crossing edges one at a time. A successful flip changes the mesh, so start the search again.
-        for (const Edge& edge : crossingEdges) if (!fixedConstraintEdges.contains(edge) && FlipEdge(triangleMesh, edge, points)) {
-            flipped = true; break;
+        for (const Edge& edge : crossingEdges) if (!fixedConstraintEdges.contains(edge)) {
+            if (diagnostics) ++diagnostics->flipAttempts;
+            if (FlipEdge(triangleMesh, edge, points)) {
+                if (diagnostics) ++diagnostics->successfulFlips;
+                flipped = true;
+                break;
+            }
         }
         if (!flipped) {
-            if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges))
-                return (fixedConstraintEdges.insert(constraint), true);
-            return false;
+            if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges, diagnostics)) {
+                fixedConstraintEdges.insert(constraint);
+                return finish(true, "recovered-by-cavity");
+            }
+            return finish(false, "cavity-failed-no-flippable-edge");
         }
     }
-    if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges))
-        return (fixedConstraintEdges.insert(constraint), true);
-    return false;
+    if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges, diagnostics)) {
+        fixedConstraintEdges.insert(constraint);
+        return finish(true, "recovered-by-cavity-after-limit");
+    }
+    return finish(false, "cavity-failed-after-iteration-limit");
 }
 
 /// Replace the shared diagonal of two adjacent triangles with the other diagonal of their four-corner shape.
@@ -562,18 +734,29 @@ bool BuildConvexHullBoundary(const std::vector<Vector2d>& points, std::vector<st
 /// @param triangleMesh Mesh whose edges may be flipped.
 /// @param points Coordinates for all vertex indices.
 /// @param fixedConstraintEdges Edges that must remain as input contour boundaries.
+/// @param diagnostics Optional counters and timing records; null when profiling is disabled.
+/// @param stage Label identifying the legalization pass in diagnostic output.
 /// @return True when the work list empties with valid topology; false if the safety limit is reached.
 bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
-    const std::set<Edge>& fixedConstraintEdges);
+    const std::set<Edge>& fixedConstraintEdges, CdtDiagnostics* diagnostics, const char* stage);
 
 /// Build a Delaunay triangulation from the real hull, then insert every point inside it.
 /// @param input All input coordinates, including hull and interior points.
 /// @param points Receives the same coordinate list so returned triangle indices refer to it.
 /// @return Triangles using only input points, or an empty list if a required stage fails.
 /// @note The real convex hull stays as the mesh boundary; no temporary enclosing triangle is used.
-std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vector<Vector2d>& points) {
+std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vector<Vector2d>& points,
+    CdtDiagnostics* diagnostics) {
+    const auto started = diagnostics && diagnostics->enabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+    const auto fail = [&](const char* reason) -> std::vector<Triangle> {
+        if (diagnostics && diagnostics->enabled) {
+            diagnostics->bowyerFailure = reason;
+            diagnostics->bowyerWatsonMs = ElapsedMilliseconds(started);
+        }
+        return {};
+    };
     points = input;
-    if (points.size() < 3) return {};
+    if (points.size() < 3) return fail("fewer-than-three-points");
     double minimumX = points[0].x, maximumX = minimumX, minimumY = points[0].y, maximumY = minimumY;
     for (const Vector2d& p : points) {
         minimumX = std::min(minimumX, p.x); maximumX = std::max(maximumX, p.x);
@@ -581,19 +764,28 @@ std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vect
     }
     const double boundingBoxSpan = std::max(maximumX - minimumX, maximumY - minimumY);
     // Reject a collapsed or non-finite point cloud before geometric predicates use it.
-    if (!std::isfinite(boundingBoxSpan) || boundingBoxSpan <= 0.0) return {};
+    if (!std::isfinite(boundingBoxSpan) || boundingBoxSpan <= 0.0) return fail("collapsed-or-nonfinite-bounds");
     const std::size_t n = points.size();
     TriangleMesh triangleMesh;
 
     std::vector<std::size_t> hull;
-    if (!BuildConvexHullBoundary(points, hull)) return {};
+    auto stageStarted = diagnostics && diagnostics->enabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+    if (!BuildConvexHullBoundary(points, hull)) return fail("convex-hull-build");
+    if (diagnostics && diagnostics->enabled) {
+        diagnostics->hullBuildMs = ElapsedMilliseconds(stageStarted);
+        diagnostics->hullVertices = hull.size();
+    }
 
     std::vector<Triangle> hullTriangles;
-    if (!TriangulateSimplePolygon(hull, points, hullTriangles)) return {};
+    stageStarted = diagnostics && diagnostics->enabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+    if (!TriangulateSimplePolygon(hull, points, hullTriangles)) return fail("convex-hull-triangulation");
+    if (diagnostics && diagnostics->enabled)
+        diagnostics->hullTriangulationMs = ElapsedMilliseconds(stageStarted);
     for (const Triangle& triangle : hullTriangles)
-        if (!AddTriangle(triangleMesh, triangle)) return {};
+        if (!AddTriangle(triangleMesh, triangle)) return fail("convex-hull-topology");
     const std::set<Edge> noFixedConstraints;
-    if (!Legalize(triangleMesh, points, noFixedConstraints)) return {};
+    if (!Legalize(triangleMesh, points, noFixedConstraints, diagnostics, "bowyer-hull-seed"))
+        return fail("convex-hull-seed-legalization");
     // Mark hull indices so they are not inserted a second time below.
     std::vector<bool> isHullVertex(n, false);
     for (std::size_t vertex : hull) isHullVertex[vertex] = true;
@@ -602,26 +794,59 @@ std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vect
     // from edges that occur only once on the removed triangles' boundary.
     for (std::size_t pointIndex = 0; pointIndex < n; ++pointIndex) {
         if (isHullVertex[pointIndex]) continue;
+        const auto insertionStarted = diagnostics && diagnostics->enabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+        const std::size_t storedSlotsAtScan = triangleMesh.triangles.size();
+        if (diagnostics && diagnostics->enabled) {
+            ++diagnostics->interiorPointCandidates;
+            diagnostics->maximumStoredSlotsAtScan = std::max(diagnostics->maximumStoredSlotsAtScan, storedSlotsAtScan);
+            diagnostics->storedTriangleSlotsScanned += storedSlotsAtScan;
+        }
         std::vector<bool> trianglesToRemove(triangleMesh.triangles.size(), false);
         std::map<Edge, int> boundaryEdgeCounts;
         bool foundCavityTriangle = false;
+        std::size_t liveTrianglesScanned = 0;
+        std::size_t cavityTriangleCount = 0;
+        std::size_t boundaryEdgeCount = 0;
+        std::size_t trianglesAdded = 0;
         // A triangle is removed when this new point lies inside its circumcircle.
         for (std::size_t triangleIndex = 0; triangleIndex < triangleMesh.triangles.size(); ++triangleIndex) {
             if (!triangleMesh.triangles[triangleIndex].isPresent) continue;
+            if (diagnostics && diagnostics->enabled) ++liveTrianglesScanned;
             const Triangle& t = triangleMesh.triangles[triangleIndex].vertexIndices;
+            if (diagnostics && diagnostics->enabled) ++diagnostics->circumcircleTests;
             if (InBall(points[t[0]], points[t[1]], points[t[2]], points[pointIndex]) > 0.0) {
                 trianglesToRemove[triangleIndex] = true; foundCavityTriangle = true;
+                if (diagnostics && diagnostics->enabled) ++cavityTriangleCount;
                 // An edge counted twice is internal to the removed cavity; an edge counted once is on its border.
                 for (int edgeIndex = 0; edgeIndex < 3; ++edgeIndex) ++boundaryEdgeCounts[MakeEdge(t[edgeIndex], t[(edgeIndex + 1) % 3])];
             }
         }
-        if (!foundCavityTriangle) continue;
+        if (!foundCavityTriangle) {
+            if (diagnostics && diagnostics->enabled) {
+                ++diagnostics->pointsWithoutCavity;
+                diagnostics->liveTrianglesScanned += liveTrianglesScanned;
+                diagnostics->slowInsertions.push_back({pointIndex, points[pointIndex], storedSlotsAtScan,
+                    liveTrianglesScanned, 0, 0, 0, ElapsedMilliseconds(insertionStarted)});
+            }
+            continue;
+        }
+        if (diagnostics && diagnostics->enabled) diagnostics->cavityTrianglesRemoved += cavityTriangleCount;
         // Remove the old cavity faces before filling their exposed boundary with faces to the new point.
         for (std::size_t triangleIndex = 0; triangleIndex < trianglesToRemove.size(); ++triangleIndex)
             if (trianglesToRemove[triangleIndex]) RemoveTriangle(triangleMesh, triangleIndex);
         for (const auto& [edge, count] : boundaryEdgeCounts) if (count == 1) {
+            if (diagnostics && diagnostics->enabled) ++boundaryEdgeCount;
             Triangle t = Ccw({edge[0], edge[1], pointIndex}, points);
-            if (Orient(points[t[0]], points[t[1]], points[t[2]]) != 0.0) AddTriangle(triangleMesh, t);
+            if (Orient(points[t[0]], points[t[1]], points[t[2]]) != 0.0 && AddTriangle(triangleMesh, t))
+                if (diagnostics && diagnostics->enabled) ++trianglesAdded;
+        }
+        if (diagnostics && diagnostics->enabled) {
+            diagnostics->liveTrianglesScanned += liveTrianglesScanned;
+            diagnostics->cavityBoundaryEdges += boundaryEdgeCount;
+            diagnostics->pointTrianglesAdded += trianglesAdded;
+            diagnostics->slowInsertions.push_back({pointIndex, points[pointIndex], storedSlotsAtScan,
+                liveTrianglesScanned, cavityTriangleCount, boundaryEdgeCount, trianglesAdded,
+                ElapsedMilliseconds(insertionStarted)});
         }
         // A failed face addition marks the topology invalid; stop rather than insert more points into it.
         if (!triangleMesh.hasValidTopology) break;
@@ -631,7 +856,13 @@ std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vect
         if (!triangle.isPresent) continue;
         triangles.push_back(triangle.vertexIndices);
     }
-    return triangleMesh.hasValidTopology ? triangles : std::vector<Triangle>{};
+    if (diagnostics && diagnostics->enabled) {
+        diagnostics->finalTriangleSlots = triangleMesh.triangles.size();
+        diagnostics->finalLiveTriangles = triangles.size();
+    }
+    if (!triangleMesh.hasValidTopology) return fail("invalid-topology-after-point-insertion");
+    if (diagnostics && diagnostics->enabled) diagnostics->bowyerWatsonMs = ElapsedMilliseconds(started);
+    return triangles;
 }
 
 /// Recover a full contour edge, splitting it first wherever another input point lies on it.
@@ -642,11 +873,16 @@ std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vect
 /// @return True when every consecutive piece of the contour edge was recovered.
 /// @note Splitting avoids asking the mesh to contain a long edge that skips over an existing vertex.
 bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
-    const std::vector<Vector2d>& points, std::set<Edge>& fixedConstraintEdges) {
+    const std::vector<Vector2d>& points, std::set<Edge>& fixedConstraintEdges,
+    CdtDiagnostics* diagnostics, std::size_t constraintIndex) {
     std::vector<std::size_t> splitPoints{constraint[0], constraint[1]};
-    for (std::size_t i = 0; i < points.size(); ++i)
-        if (i != constraint[0] && i != constraint[1] && OnSegment(points[constraint[0]], points[constraint[1]], points[i]))
+    std::size_t pointChecks = 0;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (i == constraint[0] || i == constraint[1]) continue;
+        if (diagnostics && diagnostics->enabled) ++pointChecks;
+        if (OnSegment(points[constraint[0]], points[constraint[1]], points[i]))
             splitPoints.push_back(i);
+    }
     // Order the endpoints and any points on the segment from the constraint's first end to its second.
     const Vector2d direction = points[constraint[1]] - points[constraint[0]];
     const bool sortX = std::abs(direction.x) >= std::abs(direction.y);
@@ -656,10 +892,42 @@ bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
                      : (direction.y >= 0.0 ? points[a].y < points[b].y : points[a].y > points[b].y);
     });
     splitPoints.erase(std::unique(splitPoints.begin(), splitPoints.end()), splitPoints.end());
+    const std::size_t segmentCount = splitPoints.size() - 1;
+    if (diagnostics && diagnostics->enabled) {
+        ++diagnostics->originalConstraintCount;
+        diagnostics->constraintPointChecks += pointChecks;
+        diagnostics->constraintSegments += segmentCount;
+    }
     // Recover one short segment at a time so every point on this contour edge becomes a mesh endpoint.
     for (std::size_t i = 1; i < splitPoints.size(); ++i) {
         const Edge segment = MakeEdge(splitPoints[i - 1], splitPoints[i]);
-        if (!RecoverConstraintSingle(segment, triangleMesh, points, fixedConstraintEdges)) return false;
+        ConstraintRecoveryStats segmentDiagnostics;
+        ConstraintRecoveryStats* segmentDiagnosticsPtr = nullptr;
+        if (diagnostics && diagnostics->enabled) {
+            segmentDiagnostics.originalConstraint = constraint;
+            segmentDiagnostics.segment = segment;
+            segmentDiagnostics.segmentStart = points[segment[0]];
+            segmentDiagnostics.segmentEnd = points[segment[1]];
+            segmentDiagnostics.constraintIndex = constraintIndex;
+            segmentDiagnostics.segmentIndex = i - 1;
+            segmentDiagnostics.segmentCount = segmentCount;
+            segmentDiagnostics.pointChecks = pointChecks;
+            segmentDiagnosticsPtr = &segmentDiagnostics;
+        }
+        const bool recovered = RecoverConstraintSingle(segment, triangleMesh, points, fixedConstraintEdges,
+            segmentDiagnosticsPtr);
+        if (diagnostics && diagnostics->enabled) {
+            diagnostics->constraintRecoveryIterationCount += segmentDiagnostics.iterations;
+            diagnostics->constraintEdgeEntriesScanned += segmentDiagnostics.edgeEntriesScanned;
+            diagnostics->constraintIntersectionTests += segmentDiagnostics.intersectionTests;
+            diagnostics->constraintCrossingEdgesSeen += segmentDiagnostics.crossingEdgesSeen;
+            diagnostics->constraintFlipAttempts += segmentDiagnostics.flipAttempts;
+            diagnostics->constraintSuccessfulFlips += segmentDiagnostics.successfulFlips;
+            diagnostics->cavityFallbackAttempts += segmentDiagnostics.cavityAttempts;
+            if (recovered) ++diagnostics->recoveredSegments;
+            diagnostics->recoverySegments.push_back(std::move(segmentDiagnostics));
+        }
+        if (!recovered) return false;
     }
     return true;
 }
@@ -670,14 +938,18 @@ bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
 /// @param fixedConstraintEdges Contour edges that must not be changed.
 /// @return True when every needed check is complete and topology is valid; false if the safety limit is hit.
 bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
-    const std::set<Edge>& fixedConstraintEdges) {
+    const std::set<Edge>& fixedConstraintEdges, CdtDiagnostics* diagnostics, const char* stage) {
+    const auto started = diagnostics && diagnostics->enabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
     const std::size_t iterationLimit = triangleMesh.trianglesByEdge.size() * triangleMesh.trianglesByEdge.size() * 8 + 64;
     // Legalization: check shared, unconstrained edges and flip those that violate the Delaunay circle rule.
     // Changed faces add their edges back to the worklist; the limit prevents an endless loop.
     std::deque<Edge> edgesToCheck;
     // Start with every current edge. Newly changed faces add their edges back for another check.
     for (const auto& [edge, trianglesOnEdge] : triangleMesh.trianglesByEdge) { (void)trianglesOnEdge; edgesToCheck.push_back(edge); }
+    const std::size_t initialQueueSize = edgesToCheck.size();
+    std::size_t maximumQueueSize = initialQueueSize;
     std::size_t checkedEdgeCount = 0;
+    std::size_t successfulFlips = 0;
     while (!edgesToCheck.empty() && checkedEdgeCount++ < iterationLimit) {
         const Edge edge = edgesToCheck.front(); edgesToCheck.pop_front();
         auto it = triangleMesh.trianglesByEdge.find(edge);
@@ -692,14 +964,23 @@ bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
         if (InBall(points[t[0]], points[t[1]], points[t[2]], points[d]) <= 0.0) continue;
         const std::size_t old_triangle_count = triangleMesh.triangles.size();
         if (!FlipEdge(triangleMesh, edge, points)) continue;
+        if (diagnostics && diagnostics->enabled) ++successfulFlips;
         // Recheck the changed faces' three edges; these include every edge whose opposite face changed.
         for (std::size_t triangleIndex = old_triangle_count; triangleIndex < triangleMesh.triangles.size(); ++triangleIndex) {
             const StoredTriangle& triangle = triangleMesh.triangles[triangleIndex];
             for (std::size_t opposite = 0; opposite < 3; ++opposite)
                 edgesToCheck.push_back(MakeEdge(triangle.vertexIndices[(opposite + 1) % 3], triangle.vertexIndices[(opposite + 2) % 3]));
         }
+        if (diagnostics && diagnostics->enabled)
+            maximumQueueSize = std::max(maximumQueueSize, edgesToCheck.size());
     }
-    if (edgesToCheck.empty()) return triangleMesh.hasValidTopology;
+    const bool reachedLimit = !edgesToCheck.empty();
+    if (diagnostics && diagnostics->enabled) {
+        diagnostics->legalizations.push_back({stage, initialQueueSize,
+            std::min(checkedEdgeCount, iterationLimit), successfulFlips, maximumQueueSize,
+            iterationLimit, reachedLimit, ElapsedMilliseconds(started)});
+    }
+    if (!reachedLimit) return triangleMesh.hasValidTopology;
     // End: the safety iterationLimit was reached before the mesh settled.
     return false;
 }
@@ -723,38 +1004,189 @@ void BuildConstraints(const InputGeometry& input, std::set<Edge>& constraints) {
 /// @param error Receives a short description of the first failed stage.
 /// @return True when all stages succeed; false as soon as one stage fails.
 bool BuildConstrainedTriangulation(const InputGeometry& input, const std::set<Edge>& constraints,
-    std::vector<Triangle>& triangles, std::string& error) {
+    std::vector<Triangle>& triangles, std::string& error, CdtDiagnostics* diagnostics) {
+    const auto started = diagnostics && diagnostics->enabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+    const auto fail = [&](const char* stage) {
+        if (diagnostics && diagnostics->enabled) {
+            diagnostics->constrainedBuildFailure = stage;
+            diagnostics->constrainedBuildMs = ElapsedMilliseconds(started);
+        }
+        return false;
+    };
     // First make the unconstrained Delaunay mesh, then add contour edges, then improve only free edges.
     std::vector<Vector2d> points;
-    std::vector<Triangle> initialTriangles = BowyerWatson(input.points, points);
+    std::vector<Triangle> initialTriangles = BowyerWatson(input.points, points, diagnostics);
     if (initialTriangles.empty()) {
         error = "Could not triangulate input vertices.";
-        return false;
+        return fail("bowyer-watson");
     }
     TriangleMesh triangleMesh;
+    auto stageStarted = diagnostics && diagnostics->enabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
     for (const Triangle& triangle : initialTriangles) {
         if (!AddTriangle(triangleMesh, triangle)) {
             error = "Bowyer-Watson faces could not form valid adjacency.";
-            return false;
+            if (diagnostics && diagnostics->enabled)
+                diagnostics->seedAdjacencyMs = ElapsedMilliseconds(stageStarted);
+            return fail("seed-adjacency");
         }
     }
+    if (diagnostics && diagnostics->enabled)
+        diagnostics->seedAdjacencyMs = ElapsedMilliseconds(stageStarted);
 
     std::set<Edge> fixedConstraintEdges;
+    stageStarted = diagnostics && diagnostics->enabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+    std::size_t constraintIndex = 0;
     for (const Edge& edge : constraints) {
-        if (!RecoverConstraint(edge, triangleMesh, points, fixedConstraintEdges)) {
+        if (!RecoverConstraint(edge, triangleMesh, points, fixedConstraintEdges, diagnostics, constraintIndex)) {
+            if (diagnostics && diagnostics->enabled)
+                diagnostics->constraintRecoveryMs = ElapsedMilliseconds(stageStarted);
             error = "Could not recover every contour constraint.";
-            return false;
+            return fail("constraint-recovery");
         }
+        ++constraintIndex;
     }
-    if (!Legalize(triangleMesh, points, fixedConstraintEdges)) {
+    if (diagnostics && diagnostics->enabled)
+        diagnostics->constraintRecoveryMs = ElapsedMilliseconds(stageStarted);
+    if (!Legalize(triangleMesh, points, fixedConstraintEdges, diagnostics, "constrained-final")) {
         error = "Constrained edge legalization did not converge.";
-        return false;
+        return fail("constrained-final-legalization");
     }
     triangles.clear();
     // Removed faces remain in storage, so return only entries still marked as present.
     for (const StoredTriangle& triangle : triangleMesh.triangles)
         if (triangle.isPresent) triangles.push_back(triangle.vertexIndices);
+    if (diagnostics && diagnostics->enabled)
+        diagnostics->constrainedBuildMs = ElapsedMilliseconds(started);
     return true;
+}
+
+void PrintCdtRegionDiagnostics(std::size_t regionIndex, const InputGeometry& input,
+    std::size_t contourCount, std::size_t constraintCount, const CdtDiagnostics& diagnostics,
+    double inputAssemblyMs, double filterMs, double appendMs, double regionMs,
+    std::size_t generatedTriangleCount, const char* outcome) {
+    if (!diagnostics.enabled) return;
+
+    std::ostringstream output;
+    output << std::fixed << std::setprecision(3);
+    output << "[navmesh-cdt] region=" << regionIndex << " result=" << outcome
+        << " contours=" << contourCount << " input_points=" << input.points.size()
+        << " constraints=" << constraintCount << " generated_triangles=" << generatedTriangleCount
+        << " input_ms=" << inputAssemblyMs << " build_ms=" << diagnostics.constrainedBuildMs
+        << " filter_ms=" << filterMs << " append_ms=" << appendMs << " region_ms=" << regionMs;
+    if (!diagnostics.constrainedBuildFailure.empty())
+        output << " failure_stage=" << diagnostics.constrainedBuildFailure;
+    if (!diagnostics.bowyerFailure.empty())
+        output << " bowyer_failure=" << diagnostics.bowyerFailure;
+    output << '\n';
+
+    const double scanLiveRatio = diagnostics.liveTrianglesScanned == 0 ? 0.0 :
+        static_cast<double>(diagnostics.storedTriangleSlotsScanned) /
+            static_cast<double>(diagnostics.liveTrianglesScanned);
+    output << "[navmesh-cdt] region=" << regionIndex << " stage=bowyer-watson"
+        << " total_ms=" << diagnostics.bowyerWatsonMs << " hull_ms=" << diagnostics.hullBuildMs
+        << " hull_vertices=" << diagnostics.hullVertices
+        << " hull_triangulation_ms=" << diagnostics.hullTriangulationMs
+        << " interior_point_candidates=" << diagnostics.interiorPointCandidates
+        << " points_without_cavity=" << diagnostics.pointsWithoutCavity
+        << " triangle_slots_scanned=" << diagnostics.storedTriangleSlotsScanned
+        << " live_triangles_scanned=" << diagnostics.liveTrianglesScanned
+        << " circumcircle_tests=" << diagnostics.circumcircleTests
+        << " cavity_triangles_removed=" << diagnostics.cavityTrianglesRemoved
+        << " cavity_boundary_edges=" << diagnostics.cavityBoundaryEdges
+        << " triangles_added=" << diagnostics.pointTrianglesAdded
+        << " max_stored_slots_at_scan=" << diagnostics.maximumStoredSlotsAtScan
+        << " final_triangle_slots=" << diagnostics.finalTriangleSlots
+        << " final_live_triangles=" << diagnostics.finalLiveTriangles
+        << " stored_to_live_scan_ratio=" << scanLiveRatio << '\n';
+
+    output << "[navmesh-cdt] region=" << regionIndex << " stage=constraint-recovery"
+        << " total_ms=" << diagnostics.constraintRecoveryMs
+        << " original_constraints=" << diagnostics.originalConstraintCount
+        << " split_segments=" << diagnostics.constraintSegments
+        << " recovered_segments=" << diagnostics.recoveredSegments
+        << " point_on_segment_checks=" << diagnostics.constraintPointChecks
+        << " iterations=" << diagnostics.constraintRecoveryIterationCount
+        << " edge_entries_scanned=" << diagnostics.constraintEdgeEntriesScanned
+        << " intersection_tests=" << diagnostics.constraintIntersectionTests
+        << " crossing_edges_seen=" << diagnostics.constraintCrossingEdgesSeen
+        << " flip_attempts=" << diagnostics.constraintFlipAttempts
+        << " successful_flips=" << diagnostics.constraintSuccessfulFlips
+        << " cavity_fallback_attempts=" << diagnostics.cavityFallbackAttempts << '\n';
+
+    for (const LegalizationStats& legalization : diagnostics.legalizations) {
+        output << "[navmesh-cdt] region=" << regionIndex << " stage=legalize"
+            << " pass=" << legalization.stage << " elapsed_ms=" << legalization.elapsedMs
+            << " initial_queue=" << legalization.initialQueueSize
+            << " checked_edges=" << legalization.checkedEdges
+            << " successful_flips=" << legalization.successfulFlips
+            << " max_queue=" << legalization.maximumQueueSize
+            << " iteration_limit=" << legalization.iterationLimit
+            << " reached_limit=" << (legalization.reachedLimit ? "true" : "false") << '\n';
+    }
+
+    std::vector<BowyerInsertionStats> slowInsertions = diagnostics.slowInsertions;
+    std::stable_sort(slowInsertions.begin(), slowInsertions.end(), [](const auto& a, const auto& b) {
+        return a.elapsedMs > b.elapsedMs;
+    });
+    const std::size_t insertionDetailCount = std::min<std::size_t>(8, slowInsertions.size());
+    for (std::size_t i = 0; i < insertionDetailCount; ++i) {
+        const BowyerInsertionStats& insertion = slowInsertions[i];
+        output << "[navmesh-cdt] region=" << regionIndex << " slow_point_rank=" << (i + 1)
+            << " point_index=" << insertion.pointIndex
+            << " xy=(" << insertion.point.x << ',' << insertion.point.y << ')'
+            << " elapsed_ms=" << insertion.elapsedMs
+            << " stored_triangle_slots=" << insertion.storedTriangleSlots
+            << " live_triangles_scanned=" << insertion.liveTrianglesScanned
+            << " cavity_triangles=" << insertion.cavityTriangles
+            << " boundary_edges=" << insertion.boundaryEdges
+            << " triangles_added=" << insertion.trianglesAdded << '\n';
+    }
+
+    std::vector<ConstraintRecoveryStats> expensiveSegments = diagnostics.recoverySegments;
+    std::stable_sort(expensiveSegments.begin(), expensiveSegments.end(), [](const auto& a, const auto& b) {
+        return a.elapsedMs > b.elapsedMs;
+    });
+    std::vector<ConstraintRecoveryStats> selectedSegments;
+    selectedSegments.reserve(expensiveSegments.size());
+    for (const ConstraintRecoveryStats& segment : expensiveSegments)
+        if (segment.cavityAttempts > 0) selectedSegments.push_back(segment);
+    std::size_t additionalSlowSegmentCount = 0;
+    for (const ConstraintRecoveryStats& segment : expensiveSegments) {
+        if (segment.cavityAttempts > 0 || additionalSlowSegmentCount >= 12) continue;
+        selectedSegments.push_back(segment);
+        ++additionalSlowSegmentCount;
+    }
+    for (std::size_t i = 0; i < selectedSegments.size(); ++i) {
+        const ConstraintRecoveryStats& segment = selectedSegments[i];
+        output << "[navmesh-cdt] region=" << regionIndex << " slow_constraint_rank=" << (i + 1)
+            << " contour_edge=" << segment.constraintIndex
+            << " original_edge=(" << segment.originalConstraint[0] << ',' << segment.originalConstraint[1] << ')'
+            << " piece=" << (segment.segmentIndex + 1) << '/' << segment.segmentCount
+            << " endpoint_indices=(" << segment.segment[0] << ',' << segment.segment[1] << ')'
+            << " xy=(" << segment.segmentStart.x << ',' << segment.segmentStart.y << " -> "
+            << segment.segmentEnd.x << ',' << segment.segmentEnd.y << ')'
+            << " point_on_segment_checks=" << segment.pointChecks
+            << " elapsed_ms=" << segment.elapsedMs
+            << " outcome=" << segment.outcome
+            << " iterations=" << segment.iterations << '/' << segment.iterationLimit
+            << " edge_entries_scanned=" << segment.edgeEntriesScanned
+            << " intersection_tests=" << segment.intersectionTests
+            << " crossing_edges_seen=" << segment.crossingEdgesSeen
+            << " flip_attempts=" << segment.flipAttempts
+            << " successful_flips=" << segment.successfulFlips
+            << " cavity_attempts=" << segment.cavityAttempts
+            << " cavity_ms=" << segment.cavityMs
+            << " cavity_edge_entries_scanned=" << segment.cavityEdgeEntriesScanned
+            << " cavity_crossed_edges=" << segment.cavityCrossedEdges
+            << " cavity_removed_triangles=" << segment.cavityRemovedTriangles
+            << " cavity_boundary_vertices=" << segment.cavityBoundaryVertices
+            << " cavity_fill_triangles=" << segment.cavityFillTriangles
+            << " cavity_path_ms=" << segment.cavityPathMs;
+        if (!segment.cavityFailure.empty()) output << " cavity_failure=" << segment.cavityFailure;
+        output << '\n';
+    }
+
+    std::clog << output.str();
 }
 
 /// Keep faces whose centers fall inside the outer contour and outside every hole.
@@ -819,10 +1251,16 @@ void AppendRegionMesh(const InputGeometry& input, const std::set<Edge>& constrai
 /// @param regions Sanitized outer contours and hole contours ready for triangulation.
 /// @return Success with an immutable NavMesh, or failure with a user-facing explanation and no mesh.
 GenerationResult ConstrainedDelaunay::Triangulate(const detail::WalkableRegionSet& regions) const {
+    const bool diagnosticsEnabled = NavmeshDiagnosticsEnabled();
+    const auto started = diagnosticsEnabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
     std::string error;
     ConstrainedMesh combined;
     std::size_t regionCount = 0;
+    std::size_t regionIndex = 0;
     for (const detail::WalkableRegion& region : regions.Regions()) {
+        const auto regionStarted = diagnosticsEnabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+        const auto inputAssemblyStarted = diagnosticsEnabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+        CdtDiagnostics diagnostics(diagnosticsEnabled);
         InputGeometry input;
         // Offset vertices have no source identity unless the builder preserved an exact source match.
         /// Copy one contour into this region and keep its point, vertex, and contour indices aligned.
@@ -849,23 +1287,59 @@ GenerationResult ConstrainedDelaunay::Triangulate(const detail::WalkableRegionSe
             addContour(region.holeContours[i], region.holeSourceIds[i]);
         std::set<Edge> constraints;
         BuildConstraints(input, constraints);
+        const double inputAssemblyMs = diagnosticsEnabled ? ElapsedMilliseconds(inputAssemblyStarted) : 0.0;
         std::vector<Triangle> triangles;
         // Delaunay seed, constraint recovery, then unconstrained-edge legalization form one failure-aware stage.
-        if (!BuildConstrainedTriangulation(input, constraints, triangles, error))
+        if (!BuildConstrainedTriangulation(input, constraints, triangles, error, &diagnostics)) {
+            PrintCdtRegionDiagnostics(regionIndex, input, input.contours.size(), constraints.size(), diagnostics,
+                inputAssemblyMs, 0.0, 0.0, diagnosticsEnabled ? ElapsedMilliseconds(regionStarted) : 0.0,
+                0, "failed-build");
             return {GenerationStatus::Failed, {}, "Could not triangulate offset contours: " + error};
+        }
+        const auto filterStarted = diagnosticsEnabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
         KeepTrianglesInsideRegion(input, triangles, input.mesh);
-        if (!UsesEveryInputVertex(input.mesh))
+        const bool usesEveryInputVertex = UsesEveryInputVertex(input.mesh);
+        const double filterMs = diagnosticsEnabled ? ElapsedMilliseconds(filterStarted) : 0.0;
+        if (!usesEveryInputVertex) {
+            PrintCdtRegionDiagnostics(regionIndex, input, input.contours.size(), constraints.size(), diagnostics,
+                inputAssemblyMs, filterMs, 0.0, diagnosticsEnabled ? ElapsedMilliseconds(regionStarted) : 0.0,
+                input.mesh.triangles.size(), "failed-unused-input-vertex");
             return {GenerationStatus::Failed, {}, "An offset walkable component was not completely triangulated."};
+        }
 
+        const auto appendStarted = diagnosticsEnabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
         AppendRegionMesh(input, constraints, combined);
+        const double appendMs = diagnosticsEnabled ? ElapsedMilliseconds(appendStarted) : 0.0;
         ++regionCount;
+        PrintCdtRegionDiagnostics(regionIndex, input, input.contours.size(), constraints.size(), diagnostics,
+            inputAssemblyMs, filterMs, appendMs, diagnosticsEnabled ? ElapsedMilliseconds(regionStarted) : 0.0,
+            input.mesh.triangles.size(), "success");
+        ++regionIndex;
     }
 
-    if (regionCount == 0 || combined.triangles.empty())
+    if (regionCount == 0 || combined.triangles.empty()) {
+        if (diagnosticsEnabled)
+            std::clog << "[navmesh-cdt] result=failed stage=empty-combined-mesh regions=" << regionCount
+                << " vertices=" << combined.vertices.size() << " triangles=" << combined.triangles.size()
+                << " total_ms=" << ElapsedMilliseconds(started) << '\n';
         return {GenerationStatus::Failed, {}, "Agent radius leaves no triangulatable walkable area."};
+    }
     // This final pass checks reciprocal links and manifold edge use; only then is the draft published.
-    if (!BuildFinalAdjacency(combined))
+    const auto adjacencyStarted = diagnosticsEnabled ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+    const bool adjacencyBuilt = BuildFinalAdjacency(combined);
+    const double adjacencyMs = diagnosticsEnabled ? ElapsedMilliseconds(adjacencyStarted) : 0.0;
+    if (!adjacencyBuilt) {
+        if (diagnosticsEnabled)
+            std::clog << "[navmesh-cdt] result=failed stage=final-adjacency elapsed_ms=" << adjacencyMs
+                << " regions=" << regionCount << " vertices=" << combined.vertices.size()
+                << " triangles=" << combined.triangles.size() << " total_ms=" << ElapsedMilliseconds(started) << '\n';
         return {GenerationStatus::Failed, {}, "Generated navmesh has non-manifold or invalid adjacency."};
+    }
+    if (diagnosticsEnabled)
+        std::clog << "[navmesh-cdt] result=success regions=" << regionCount
+            << " vertices=" << combined.vertices.size() << " triangles=" << combined.triangles.size()
+            << " constraints=" << combined.constraints.size() << " final_adjacency_ms=" << adjacencyMs
+            << " total_ms=" << ElapsedMilliseconds(started) << '\n';
     return {GenerationStatus::Success, NavMesh(std::move(combined)), "Navmesh baked successfully."};
 }
 
