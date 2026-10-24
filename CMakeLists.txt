@@ -51,24 +51,28 @@ set(CLIPPER2_TESTS OFF CACHE BOOL "" FORCE)
 set(CLIPPER2_USINGZ OFF CACHE STRING "" FORCE)
 FetchContent_MakeAvailable(clipper2)
 
-# Define our executable target
-add_executable(${PROJECT_NAME} 
-    src/main.cpp
-    # Shared robust predicates and asynchronous bake/session support.
+# UI-independent geometry and navmesh pipeline shared by the app and headless tests.
+add_library(navmesh_core
     src/core/GeometryPredicates.cpp
-    src/app/NavmeshBakeCoordinator.cpp
-    src/app/NavmeshBakeSession.cpp
-    src/app/PathfindingSession.cpp
-    src/app/NavmeshInputKey.cpp
+    src/model/GeometryModel.cpp
+    src/validation/GeometryValidator.cpp
     src/cdt/ConstrainedDelaunay.cpp
-    # Walkable-region preparation and navmesh pipeline layers.
     src/navmesh/WalkableRegionBuilder.cpp
     src/navmesh/NavmeshPipeline.cpp
+)
+target_include_directories(navmesh_core PUBLIC src PRIVATE external)
+target_link_libraries(navmesh_core PRIVATE Clipper2)
+
+# Define the interactive application.
+add_executable(${PROJECT_NAME}
+    src/main.cpp
+    src/app/NavmeshBakeCoordinator.cpp
+    src/app/NavmeshBakeSession.cpp
+    src/app/NavmeshInputKey.cpp
+    src/app/PathfindingSession.cpp
     # Queries against the immutable generated navmesh.
     src/pathfinding/Pathfinder.cpp
     src/app/CameraController.cpp
-    src/model/GeometryModel.cpp
-    src/validation/GeometryValidator.cpp
     src/editor/EditorController.cpp
     src/render/SceneRenderer.cpp
     src/ui/ControlPanel.cpp
@@ -80,7 +84,7 @@ add_executable(${PROJECT_NAME}
 )
 
 # 1. Explicitly tell the compiler where to find headers
-target_include_directories(${PROJECT_NAME} PRIVATE 
+target_include_directories(${PROJECT_NAME} PRIVATE
     src
     external
     ${imgui_SOURCE_DIR}
@@ -89,7 +93,14 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 # 2. FIX: Link using the actual case-sensitive target names
 # Note the capital 'I' and 'G' in rlImGui!
-target_link_libraries(${PROJECT_NAME} PRIVATE raylib Clipper2)
+target_link_libraries(${PROJECT_NAME} PRIVATE raylib navmesh_core)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(navmesh_core_tests tests/navmesh/ConstrainedDelaunayRecoveryTests.cpp)
+    target_link_libraries(navmesh_core_tests PRIVATE navmesh_core)
+    add_test(NAME navmesh_core_tests COMMAND navmesh_core_tests)
+endif()
 
 
 # Setup runtime copy rules if you have assets (Images, Fonts, etc.)
