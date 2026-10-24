@@ -6,6 +6,7 @@
 #include <limits>
 #include <optional>
 #include <queue>
+#include <tuple>
 #include <utility>
 
 namespace cdt::pathfinding {
@@ -49,15 +50,16 @@ std::optional<std::vector<std::size_t>> FindCorridor(
     const double infinity = std::numeric_limits<double>::infinity();
     std::vector<double> costs(count, infinity);
     std::vector<std::size_t> previous(count, count);
-    using Entry = std::pair<double, std::size_t>;
+    using Entry = std::tuple<double, double, std::size_t>;
     std::priority_queue<Entry, std::vector<Entry>, std::greater<>> pending;
     costs[start] = 0.0;
-    pending.emplace(Centroid(mesh, mesh.Triangles()[start]).distance(destination), start);
+    pending.emplace(Centroid(mesh, mesh.Triangles()[start]).distance(destination), 0.0, start);
     // Costs are centroid-to-centroid distances; the straight-line distance to the goal is admissible.
     while (!pending.empty()) {
-        const auto [estimate, current] = pending.top();
+        const auto [estimate, cost, current] = pending.top();
         pending.pop();
         (void)estimate;
+        if (cost > costs[current]) continue;
         if (current == goal) break;
         const Vector2d currentCenter = Centroid(mesh, mesh.Triangles()[current]);
         for (const auto neighbor : mesh.Triangles()[current].neighbors) {
@@ -67,7 +69,7 @@ std::optional<std::vector<std::size_t>> FindCorridor(
             if (candidate < costs[*neighbor]) {
                 costs[*neighbor] = candidate;
                 previous[*neighbor] = current;
-                pending.emplace(candidate + center.distance(destination), *neighbor);
+                pending.emplace(candidate + center.distance(destination), candidate, *neighbor);
             }
         }
     }
