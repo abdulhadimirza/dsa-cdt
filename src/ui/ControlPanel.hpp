@@ -5,6 +5,7 @@
 #include "editor/EditorState.hpp"
 #include "model/GeometryModel.hpp"
 #include "render/SceneRenderer.hpp"
+#include "pathfinding/Pathfinder.hpp"
 
 #include <optional>
 
@@ -17,6 +18,7 @@ struct ControlRequests {
     bool clear_geometry{false};
     bool bake_navmesh{false};
     bool delete_navmesh{false};
+    bool generate_path{false};
     std::optional<EditorTool> selected_tool;
     std::optional<EditBehavior> selected_edit_behavior;
     std::optional<double> agent_radius;
@@ -26,13 +28,16 @@ class ControlPanel {
 public:
     [[nodiscard]] ControlRequests Draw(const Camera2D& camera, Vector2 mouse_screen,
         Vector2d mouse_world, const GeometryModel& model, const EditorState& editor,
-        bool has_baked_mesh, bool bake_attempted, GenerationStatus last_bake_status, bool mesh_out_of_date, bool bake_running);
+        bool has_baked_mesh, bool bake_attempted, GenerationStatus last_bake_status, bool mesh_out_of_date,
+        bool bake_running, const std::optional<pathfinding::PathResult>& path);
     [[nodiscard]] const RenderOptions& Options() const noexcept { return options; }
     [[nodiscard]] bool AutoBakeNavmesh() const noexcept { return auto_bake_navmesh; }
+    [[nodiscard]] bool AutoUpdatePath() const noexcept { return auto_update_path; }
 
 private:
     RenderOptions options{};
     bool auto_bake_navmesh{false};
+    bool auto_update_path{false};
     double agent_radius{0.0};
 };
 

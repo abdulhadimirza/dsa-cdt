@@ -95,9 +95,8 @@ std::vector<Portal> BuildPortals(const NavMesh& mesh, const std::vector<std::siz
         const auto& vertices = mesh.Vertices();
         const Vector2d a = vertices[triangle.vertices[(slot + 1) % 3]].position;
         const Vector2d b = vertices[triangle.vertices[(slot + 2) % 3]].position;
-        // The current face is counterclockwise, so its opposite-edge order becomes left/right
-        // when crossing into the neighbor.
-        portals.push_back({b, a});
+        // Use the opposite-edge order expected by SmoothPath's signed-area tests.
+        portals.push_back({a, b});
     }
     portals.push_back({goal, goal});
     return portals;

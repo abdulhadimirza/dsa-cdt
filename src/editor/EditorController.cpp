@@ -56,6 +56,20 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
         state.dragged_vertex.reset();
     }
 
+    if (state.active_tool == EditorTool::Start || state.active_tool == EditorTool::Goal) {
+        state.hovered_vertex.reset();
+        if (input.left_pressed) {
+            if (state.active_tool == EditorTool::Start) {
+                state.start_point = input.cursor_world;
+                state.status_message = "Start point set.";
+            } else {
+                state.goal_point = input.cursor_world;
+                state.status_message = "Goal point set.";
+            }
+        }
+        return;
+    }
+
     if (state.active_tool != EditorTool::Edit) {
         state.hovered_vertex = PickVertex(model, input.cursor_world, input.pick_radius_world);
         if (input.escape_pressed) return;

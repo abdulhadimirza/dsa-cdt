@@ -9,7 +9,8 @@ namespace cdt {
 
 ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
     Vector2d mouse_world, const GeometryModel& model, const EditorState& editor,
-    bool has_baked_mesh, bool bake_attempted, GenerationStatus last_bake_status, bool mesh_out_of_date, bool bake_running) {
+    bool has_baked_mesh, bool bake_attempted, GenerationStatus last_bake_status, bool mesh_out_of_date,
+    bool bake_running, const std::optional<pathfinding::PathResult>& path) {
     ControlRequests requests{};
 
     ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
@@ -35,6 +36,10 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
             requests.selected_tool = EditorTool::Border;
         if (ImGui::RadioButton("Draw Obstacle", editor.active_tool == EditorTool::Obstacle))
             requests.selected_tool = EditorTool::Obstacle;
+        if (ImGui::RadioButton("Set Start", editor.active_tool == EditorTool::Start))
+            requests.selected_tool = EditorTool::Start;
+        if (ImGui::RadioButton("Set Goal", editor.active_tool == EditorTool::Goal))
+            requests.selected_tool = EditorTool::Goal;
         if (editor.active_tool == EditorTool::Edit) {
             ImGui::TextDisabled("Click empty space to add; right-click a point to delete.");
             ImGui::Indent();
@@ -45,7 +50,7 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
             ImGui::Unindent();
             ImGui::TextDisabled(editor.edit_behavior == EditBehavior::MoveChain
                 ? "Drag a point to move its connected edges." : "Drag a point to move it.");
-        } else {
+        } else if (editor.active_tool == EditorTool::Border || editor.active_tool == EditorTool::Obstacle) {
             const char* description = editor.active_tool == EditorTool::Border
                 ? "Click points in order to draw the map boundary."
                 : "Click points in order to draw an obstacle.";
@@ -53,11 +58,44 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
             ImGui::TextDisabled("Click the first point to close; Esc cancels.");
             if (!editor.edge_chain.empty())
                 ImGui::Text("Drawing: %zu points", editor.edge_chain.size());
+        } else {
+            ImGui::TextDisabled(editor.active_tool == EditorTool::Start
+                ? "Click the navmesh to place or replace the start point."
+                : "Click the navmesh to place or replace the goal point.");
         }
         if (!editor.status_message.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "%s", editor.status_message.c_str());
         }
         requests.clear_geometry = ImGui::Button("Clear Geometry", ImVec2(-1.0f, 24.0f));
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Pathfinding");
+        if (editor.start_point)
+            ImGui::Text("Start: (%.1f, %.1f)", editor.start_point->x, editor.start_point->y);
+        else ImGui::TextDisabled("Start: not set");
+        if (editor.goal_point)
+            ImGui::Text("Goal: (%.1f, %.1f)", editor.goal_point->x, editor.goal_point->y);
+        else ImGui::TextDisabled("Goal: not set");
+        ImGui::Checkbox("Auto Update Path", &auto_update_path);
+        requests.generate_path = ImGui::Button("Generate Path", ImVec2(-1.0f, 24.0f)) &&
+            has_baked_mesh && editor.start_point.has_value() && editor.goal_point.has_value();
+        if (!has_baked_mesh || !editor.start_point || !editor.goal_point)
+            ImGui::TextDisabled("Requires a baked navmesh, start, and goal.");
+        if (path) {
+            switch (path->status) {
+                case pathfinding::PathStatus::Success:
+                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Path generated: %zu waypoints", path->waypoints.size());
+                    break;
+                case pathfinding::PathStatus::StartOutsideMesh:
+                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Path failed: start is outside traversable mesh.");
+                    break;
+                case pathfinding::PathStatus::GoalOutsideMesh:
+                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Path failed: goal is outside traversable mesh.");
+                    break;
+                case pathfinding::PathStatus::NoPath:
+                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Path failed: no traversable route.");
+                    break;
+            }
+        }
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Navmesh Setup & Bake");
         double edited_radius = agent_radius;

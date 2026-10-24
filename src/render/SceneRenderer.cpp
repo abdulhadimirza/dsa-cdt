@@ -32,7 +32,8 @@ Vector2 ToRaylib(Vector2d position) {
 } // namespace
 
 void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidationReport& validation,
-    const EditorState& editor, const RenderOptions& options, const NavMesh* mesh) const {
+    const EditorState& editor, const RenderOptions& options, const NavMesh* mesh,
+    const std::optional<pathfinding::PathResult>& path) const {
     // Diagnostics are indexed in model-loop order by GeometryValidationReport.
     if (mesh) for (const MeshTriangle& triangle : mesh->Triangles()) {
         const Vector2 a = ToRaylib(mesh->Vertices()[triangle.vertices[0]].position);
@@ -44,6 +45,24 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidati
         DrawLineEx(a, b, 1.5f, edge);
         DrawLineEx(b, c, 1.5f, edge);
         DrawLineEx(c, a, 1.5f, edge);
+    }
+    if (path && path->status == pathfinding::PathStatus::Success) {
+        for (std::size_t i = 1; i < path->waypoints.size(); ++i)
+            DrawLineEx(ToRaylib(path->waypoints[i - 1]), ToRaylib(path->waypoints[i]), 4.0f, Color{255, 225, 80, 255});
+        for (const Vector2d waypoint : path->waypoints)
+            DrawCircleV(ToRaylib(waypoint), 4.0f, Color{255, 245, 170, 255});
+    }
+    if (editor.start_point) {
+        const Vector2 start = ToRaylib(*editor.start_point);
+        DrawCircleV(start, 11.0f, Color{15, 18, 24, 255});
+        DrawCircleV(start, 7.0f, Color{70, 220, 125, 255});
+        DrawText("S", static_cast<int>(start.x) - 4, static_cast<int>(start.y) - 8, 16, Color{15, 18, 24, 255});
+    }
+    if (editor.goal_point) {
+        const Vector2 goal = ToRaylib(*editor.goal_point);
+        DrawCircleV(goal, 11.0f, Color{15, 18, 24, 255});
+        DrawCircleV(goal, 7.0f, Color{255, 105, 95, 255});
+        DrawText("G", static_cast<int>(goal.x) - 5, static_cast<int>(goal.y) - 8, 16, Color{15, 18, 24, 255});
     }
     const std::unordered_set<VertexId> moving_chain_vertices(
         editor.chain_move_vertices.begin(), editor.chain_move_vertices.end());

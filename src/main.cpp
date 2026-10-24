@@ -9,6 +9,7 @@
 #include "cdt/ConstrainedDelaunay.hpp"
 #include "editor/EditorController.hpp"
 #include "model/GeometryModel.hpp"
+#include "pathfinding/Pathfinder.hpp"
 #include "render/SceneRenderer.hpp"
 #include "validation/GeometryValidator.hpp"
 #include "ui/ControlPanel.hpp"
@@ -41,6 +42,7 @@ int main() {
     cdt::NavmeshBakeCoordinator bake_coordinator;
     cdt::NavmeshBakeSession bake_session;
     cdt::ControlPanel control_panel;
+    std::optional<cdt::pathfinding::PathResult> path_result;
     double agent_radius = 0.0;
 
     while (!WindowShouldClose()) {
@@ -60,14 +62,32 @@ int main() {
         editor_input.left_released = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
         editor_input.right_pressed = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
         editor_input.escape_pressed = IsKeyPressed(KEY_ESCAPE);
+        const auto previous_start = editor.State().start_point;
+        const auto previous_goal = editor.State().goal_point;
         editor.Update(editor_input, geometry);
+        const bool endpoints_changed = previous_start != editor.State().start_point ||
+            previous_goal != editor.State().goal_point;
+        if (endpoints_changed) path_result.reset();
         const cdt::GeometryValidationReport validation = validator.Validate(geometry);
         const std::string input_key = cdt::MakeNavmeshInputKey(validation.validated_navmesh_input, agent_radius);
 
+        bool mesh_replaced = false;
         if (auto completion = bake_coordinator.TakeCompletion()) {
-            if (bake_session.Apply(std::move(*completion)) &&
-                bake_session.last_bake_status == cdt::GenerationStatus::Failed)
+            const bool applied = bake_session.Apply(std::move(*completion));
+            mesh_replaced = applied && bake_session.last_bake_status == cdt::GenerationStatus::Success;
+            if (applied && bake_session.last_bake_status == cdt::GenerationStatus::Failed)
                 std::cerr << "Navmesh generation failed: " << completion->result.message << '\n';
+        }
+
+        // Recompute before drawing so the previous route remains visible until its replacement is ready.
+        if (endpoints_changed || mesh_replaced) {
+            if (control_panel.AutoUpdatePath() && bake_session.baked_mesh &&
+                editor.State().start_point && editor.State().goal_point) {
+                path_result = cdt::pathfinding::FindPath(*bake_session.baked_mesh,
+                    *editor.State().start_point, *editor.State().goal_point);
+            } else {
+                path_result.reset();
+            }
         }
 
         // Rendering uses the accepted mesh while validation report drives live loop diagnostics.
@@ -76,7 +96,8 @@ int main() {
         BeginMode2D(camera.GetCamera());
         camera.DrawWorldGrid();
         renderer.DrawWorld(geometry, validation, editor.State(),
-            control_panel.Options(), bake_session.baked_mesh.has_value() ? &*bake_session.baked_mesh : nullptr);
+            control_panel.Options(), bake_session.baked_mesh.has_value() ? &*bake_session.baked_mesh : nullptr,
+            path_result);
         EndMode2D();
 
         renderer.DrawOverlays(geometry, control_panel.Options(), camera.GetCamera(), editor.State());
@@ -84,7 +105,8 @@ int main() {
         const cdt::ControlRequests requests = control_panel.Draw(
             camera.GetCamera(), mouse_screen, mouse_world, geometry, editor.State(),
             bake_session.baked_mesh.has_value(), bake_session.bake_attempted, bake_session.last_bake_status,
-            bake_session.baked_mesh.has_value() && input_key != bake_session.baked_input_key, bake_coordinator.IsRunning());
+            bake_session.baked_mesh.has_value() && input_key != bake_session.baked_input_key, bake_coordinator.IsRunning(),
+            path_result);
         if (requests.agent_radius) agent_radius = *requests.agent_radius;
         // Recompute after UI input so a radius edit changes the request key immediately.
         const std::string bake_input_key = cdt::MakeNavmeshInputKey(validation.validated_navmesh_input, agent_radius);
@@ -98,11 +120,19 @@ int main() {
             bake_session.bake_attempted = true;
             (void)bake_coordinator.Request(validation.validated_navmesh_input, agent_radius, bake_input_key);
         }
-        if (requests.delete_navmesh) bake_session.baked_mesh.reset();
+        if (requests.delete_navmesh) {
+            bake_session.baked_mesh.reset();
+            path_result.reset();
+        }
         if (requests.clear_geometry) {
             geometry.Clear();
             editor.ClearInteraction();
         }
+
+        if (requests.generate_path && bake_session.baked_mesh &&
+            editor.State().start_point && editor.State().goal_point)
+            path_result = cdt::pathfinding::FindPath(*bake_session.baked_mesh,
+                *editor.State().start_point, *editor.State().goal_point);
 
         if (control_panel.AutoBakeNavmesh() && bake_session.baked_mesh && bake_input_key != bake_session.baked_input_key &&
             bake_input_key != bake_session.last_auto_requested_key) {
