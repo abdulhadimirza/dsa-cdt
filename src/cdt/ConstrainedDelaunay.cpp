@@ -6,13 +6,11 @@
 #include <cstddef>
 #include <deque>
 #include <functional>
-#include <iomanip>
 #include <limits>
 #include <map>
 #include <queue>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <string>
 
 
@@ -146,45 +144,6 @@ bool BuildFinalAdjacency(ConstrainedMesh& mesh) {
 // Report whether the mesh currently contains the requested undirected edge.
 bool HasEdge(const TriangleMesh& triangleMesh, const Edge& edge) { return triangleMesh.trianglesByEdge.contains(edge); }
 
-// Check the raw Bowyer-Watson faces before they are copied into the adjacency map.
-bool TrianglesContainEdge(const Edge& edge, const std::vector<Triangle>& triangles) {
-    for (const Triangle& triangle : triangles)
-        for (std::size_t i = 0; i < triangle.size(); ++i)
-            if (MakeEdge(triangle[i], triangle[(i + 1) % triangle.size()]) == edge) return true;
-    return false;
-}
-
-// Print the raw Bowyer-Watson faces incident to either endpoint, including their vertex coordinates.
-std::string DescribeRawEndpointTriangles(const Edge& constraint, const std::vector<Triangle>& triangles,
-    const std::vector<Vector2d>& points) {
-    constexpr std::size_t maxPrintedTriangles = 64;
-    std::ostringstream description;
-    description << std::setprecision(17);
-    std::size_t touchingTriangleCount = 0;
-    std::size_t printedTriangleCount = 0;
-    for (std::size_t triangleIndex = 0; triangleIndex < triangles.size(); ++triangleIndex) {
-        const Triangle& triangle = triangles[triangleIndex];
-        const bool touchesEndpoint = std::find(triangle.begin(), triangle.end(), constraint[0]) != triangle.end() ||
-            std::find(triangle.begin(), triangle.end(), constraint[1]) != triangle.end();
-        if (!touchesEndpoint) continue;
-        ++touchingTriangleCount;
-        if (printedTriangleCount == maxPrintedTriangles) continue;
-        if (printedTriangleCount != 0) description << "; ";
-        description << "t" << triangleIndex << "=[";
-        for (std::size_t vertexSlot = 0; vertexSlot < triangle.size(); ++vertexSlot) {
-            if (vertexSlot != 0) description << ", ";
-            const std::size_t vertex = triangle[vertexSlot];
-            description << vertex << "=(" << points[vertex].x << "," << points[vertex].y << ")";
-        }
-        description << "]";
-        ++printedTriangleCount;
-    }
-    if (touchingTriangleCount == 0) return "(none)";
-    if (touchingTriangleCount > printedTriangleCount)
-        description << "; ... " << (touchingTriangleCount - printedTriangleCount) << " more";
-    return description.str();
-}
-
 // Return the signed side of C relative to AB. Other functions use the sign to test turns and crossings.
 double Orient(const Vector2d& firstPoint, const Vector2d& secondPoint, const Vector2d& thirdPoint) {
     return geometry::Orient2D(firstPoint, secondPoint, thirdPoint);
@@ -229,49 +188,6 @@ bool ProperlyIntersects(const Vector2d& a, const Vector2d& b, const Vector2d& c,
         ((cd_a > 0.0 && cd_b < 0.0) || (cd_a < 0.0 && cd_b > 0.0));
 }
 
-std::size_t CountProperCrossingEdges(const Edge& segment, const TriangleMesh& triangleMesh,
-    const std::vector<Vector2d>& points) {
-    std::size_t count = 0;
-    for (const auto& [edge, uses] : triangleMesh.trianglesByEdge) {
-        (void)uses;
-        if (ProperlyIntersects(points[segment[0]], points[segment[1]], points[edge[0]], points[edge[1]])) ++count;
-    }
-    return count;
-}
-
-std::size_t CountIncidentEdges(std::size_t vertex, const TriangleMesh& triangleMesh) {
-    std::size_t count = 0;
-    for (const auto& [edge, uses] : triangleMesh.trianglesByEdge) {
-        (void)uses;
-        if (edge[0] == vertex || edge[1] == vertex) ++count;
-    }
-    return count;
-}
-
-std::string DescribeConstraintNeighborhood(const Edge& constraint, const TriangleMesh& triangleMesh,
-    const std::vector<Vector2d>& points) {
-    std::ostringstream description;
-    description << std::setprecision(17);
-    for (std::size_t endpointSlot = 0; endpointSlot < constraint.size(); ++endpointSlot) {
-        if (endpointSlot != 0) description << "; ";
-        const std::size_t endpoint = constraint[endpointSlot];
-        description << "endpoint " << endpoint << "=(" << points[endpoint].x << "," << points[endpoint].y
-            << ") adjacent vertices [";
-        bool firstNeighbor = true;
-        for (const auto& [edge, uses] : triangleMesh.trianglesByEdge) {
-            (void)uses;
-            if (edge[0] != endpoint && edge[1] != endpoint) continue;
-            const std::size_t neighbor = edge[0] == endpoint ? edge[1] : edge[0];
-            if (!firstNeighbor) description << ", ";
-            firstNeighbor = false;
-            description << neighbor << "=(" << points[neighbor].x << "," << points[neighbor].y
-                << "; orient=" << Orient(points[constraint[0]], points[constraint[1]], points[neighbor]) << ")";
-        }
-        description << "]";
-    }
-    return description.str();
-}
-
 bool OnSegment(const Vector2d& a, const Vector2d& b, const Vector2d& p) {
     return Orient(a, b, p) == 0.0 && p.x >= std::min(a.x, b.x) && p.x <= std::max(a.x, b.x) &&
         p.y >= std::min(a.y, b.y) && p.y <= std::max(a.y, b.y);
@@ -292,16 +208,10 @@ bool PointInTriangleInclusive(const Vector2d& p, const Vector2d& a, const Vector
 // Ear clip a simple polygon. Collinear boundary vertices are retained; they are
 // skipped as ears but remain represented by adjacent non-degenerate faces.
 bool TriangulateSimplePolygon(std::vector<std::size_t> polygon, const std::vector<Vector2d>& points,
-    std::vector<Triangle>& result, std::string& failureReason) {
-    if (polygon.size() < 3) {
-        failureReason = "cavity side has fewer than three boundary vertices";
-        return false;
-    }
+    std::vector<Triangle>& result) {
+    if (polygon.size() < 3) return false;
     const double area2 = PolygonArea2(polygon, points);
-    if (area2 == 0.0) {
-        failureReason = "cavity side has zero signed area";
-        return false;
-    }
+    if (area2 == 0.0) return false;
     if (area2 < 0.0) std::reverse(polygon.begin(), polygon.end());
     while (polygon.size() > 3) {
         bool clipped = false;
@@ -324,44 +234,29 @@ bool TriangulateSimplePolygon(std::vector<std::size_t> polygon, const std::vecto
             clipped = true; break;
         }
         if (!clipped) {
-            failureReason = "ear clipping found no valid ear with " + std::to_string(polygon.size()) + " vertices remaining";
             return false;
         }
     }
-    if (Orient(points[polygon[0]], points[polygon[1]], points[polygon[2]]) == 0.0) {
-        failureReason = "ear clipping left a zero-area final triangle";
-        return false;
-    }
+    if (Orient(points[polygon[0]], points[polygon[1]], points[polygon[2]]) == 0.0) return false;
     result.push_back(Ccw({polygon[0], polygon[1], polygon[2]}, points));
     return true;
 }
 
 bool RecoverByCavity(const Edge& constraint, TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
-    const std::set<Edge>& fixedConstraintEdges, std::string& failureReason) {
+    const std::set<Edge>& fixedConstraintEdges) {
     std::vector<Edge> crossedEdges;
     for (const auto& [edge, uses] : triangleMesh.trianglesByEdge) {
         (void)uses;
         if (ProperlyIntersects(points[constraint[0]], points[constraint[1]], points[edge[0]], points[edge[1]])) {
-            if (fixedConstraintEdges.contains(edge)) {
-                failureReason = "requested segment crosses previously recovered constraint edge [" +
-                    std::to_string(edge[0]) + ", " + std::to_string(edge[1]) + "]";
-                return false;
-            }
+            if (fixedConstraintEdges.contains(edge)) return false;
             crossedEdges.push_back(edge);
         }
     }
-    if (crossedEdges.empty()) {
-        failureReason = "edge flipping stalled, but no mesh edge properly crosses the requested segment";
-        return false;
-    }
+    if (crossedEdges.empty()) return false;
     std::set<TriangleIndex> removed;
     for (const Edge& edge : crossedEdges) {
         const auto it = triangleMesh.trianglesByEdge.find(edge);
-        if (it == triangleMesh.trianglesByEdge.end() || it->second.triangleCount != 2) {
-            failureReason = "crossed edge [" + std::to_string(edge[0]) + ", " + std::to_string(edge[1]) +
-                "] is missing or does not have exactly two adjacent triangles";
-            return false;
-        }
+        if (it == triangleMesh.trianglesByEdge.end() || it->second.triangleCount != 2) return false;
         for (std::size_t i = 0; i < 2; ++i) removed.insert(it->second.triangles[i].triangleIndex);
     }
 
@@ -374,91 +269,41 @@ bool RecoverByCavity(const Edge& constraint, TriangleMesh& triangleMesh, const s
     for (const auto& [edge, count] : counts) if (count == 1) {
         graph[edge[0]].push_back(edge[1]); graph[edge[1]].push_back(edge[0]);
     }
-    if (graph[constraint[0]].size() != 2 || graph[constraint[1]].size() != 2) {
-        failureReason = "cavity boundary does not have two paths at the requested endpoints (degrees " +
-            std::to_string(graph[constraint[0]].size()) + " and " +
-            std::to_string(graph[constraint[1]].size()) + ")";
-        return false;
-    }
+    if (graph[constraint[0]].size() != 2 || graph[constraint[1]].size() != 2) return false;
 
-    auto makePath = [&](std::size_t firstNeighbor, std::string& pathFailure) -> std::vector<std::size_t> {
+    auto makePath = [&](std::size_t firstNeighbor) -> std::vector<std::size_t> {
         std::vector<std::size_t> path{constraint[0]};
         std::size_t previous = constraint[0], current = firstNeighbor;
         while (true) {
             if (std::find(path.begin(), path.end(), current) != path.end()) {
-                pathFailure = "cavity boundary walk loops before reaching the other endpoint";
                 return {};
             }
             path.push_back(current);
             if (current == constraint[1]) return path;
             const auto it = graph.find(current);
-            if (it == graph.end() || it->second.size() != 2) {
-                pathFailure = "cavity boundary walk reached a vertex whose degree is not two";
-                return {};
-            }
-            if (path.size() > graph.size()) {
-                pathFailure = "cavity boundary walk exceeded the number of boundary vertices";
-                return {};
-            }
+            if (it == graph.end() || it->second.size() != 2) return {};
+            if (path.size() > graph.size()) return {};
             const std::size_t next = it->second[0] == previous ? it->second[1] : it->second[0];
             previous = current; current = next;
         }
     };
-    std::string pathFailure;
-    auto first = makePath(graph[constraint[0]][0], pathFailure);
-    if (first.empty()) {
-        failureReason = "first cavity boundary path failed: " + pathFailure;
-        return false;
-    }
-    auto second = makePath(graph[constraint[0]][1], pathFailure);
-    if (second.empty()) {
-        failureReason = "second cavity boundary path failed: " + pathFailure;
-        return false;
-    }
-    if (first == second) {
-        failureReason = "both cavity boundary walks produced the same path";
-        return false;
-    }
+    auto first = makePath(graph[constraint[0]][0]);
+    if (first.empty()) return false;
+    auto second = makePath(graph[constraint[0]][1]);
+    if (second.empty() || first == second) return false;
 
     std::vector<Triangle> fill;
-    std::string triangulationFailure;
-    if (!TriangulateSimplePolygon(std::move(first), points, fill, triangulationFailure)) {
-        failureReason = "could not triangulate first cavity side: " + triangulationFailure;
-        return false;
-    }
-    if (!TriangulateSimplePolygon(std::move(second), points, fill, triangulationFailure)) {
-        failureReason = "could not triangulate second cavity side: " + triangulationFailure;
-        return false;
-    }
+    if (!TriangulateSimplePolygon(std::move(first), points, fill)) return false;
+    if (!TriangulateSimplePolygon(std::move(second), points, fill)) return false;
     TriangleMesh candidate = triangleMesh;
     for (TriangleIndex index : removed) RemoveTriangle(candidate, index);
-    if (!candidate.hasValidTopology) {
-        failureReason = "removing the crossed strip left invalid mesh topology";
-        return false;
-    }
+    if (!candidate.hasValidTopology) return false;
     for (const Triangle& t : fill) {
-        if (Orient(points[t[0]], points[t[1]], points[t[2]]) == 0.0) {
-            failureReason = "cavity triangulation produced a zero-area face";
-            return false;
-        }
-        if (!AddTriangle(candidate, t)) {
-            failureReason = "adding a cavity face would create non-manifold topology";
-            return false;
-        }
+        if (Orient(points[t[0]], points[t[1]], points[t[2]]) == 0.0) return false;
+        if (!AddTriangle(candidate, t)) return false;
     }
-    if (!candidate.hasValidTopology) {
-        failureReason = "candidate cavity mesh has invalid topology after retriangulation";
-        return false;
-    }
-    if (!HasEdge(candidate, constraint)) {
-        failureReason = "candidate cavity mesh does not contain the requested constraint edge";
-        return false;
-    }
-    for (const Edge& fixed : fixedConstraintEdges) if (!HasEdge(candidate, fixed)) {
-        failureReason = "candidate cavity mesh would remove previously recovered constraint edge [" +
-            std::to_string(fixed[0]) + ", " + std::to_string(fixed[1]) + "]";
-        return false;
-    }
+    if (!candidate.hasValidTopology || !HasEdge(candidate, constraint)) return false;
+    for (const Edge& fixed : fixedConstraintEdges) if (!HasEdge(candidate, fixed)) return false;
     triangleMesh = std::move(candidate);
     return true;
 }
@@ -466,7 +311,7 @@ bool RecoverByCavity(const Edge& constraint, TriangleMesh& triangleMesh, const s
 bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Vector2d>& points);
 
 bool RecoverConstraintSingle(const Edge& constraint, TriangleMesh& triangleMesh,
-    const std::vector<Vector2d>& points, std::set<Edge>& fixedConstraintEdges, std::string& failureReason) {
+    const std::vector<Vector2d>& points, std::set<Edge>& fixedConstraintEdges) {
     const std::size_t iterationLimit = triangleMesh.trianglesByEdge.size() * triangleMesh.trianglesByEdge.size() + 32;
     for (std::size_t iteration = 0; iteration < iterationLimit; ++iteration) {
         if (HasEdge(triangleMesh, constraint)) { fixedConstraintEdges.insert(constraint); return true; }
@@ -480,15 +325,13 @@ bool RecoverConstraintSingle(const Edge& constraint, TriangleMesh& triangleMesh,
             flipped = true; break;
         }
         if (!flipped) {
-            if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges, failureReason))
+            if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges))
                 return (fixedConstraintEdges.insert(constraint), true);
-            failureReason = "edge flipping stalled; cavity recovery failed: " + failureReason;
             return false;
         }
     }
-    if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges, failureReason))
+    if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges))
         return (fixedConstraintEdges.insert(constraint), true);
-    failureReason = "edge flipping reached its iteration limit; cavity recovery failed: " + failureReason;
     return false;
 }
 
@@ -521,14 +364,10 @@ bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Ve
 
 // Find the outside outline of all points, going counterclockwise around it.
 // Points inside the outline are not returned. Points lying along a straight outside edge are kept.
-bool BuildConvexHullBoundary(const std::vector<Vector2d>& points, std::vector<std::size_t>& hull,
-    std::string& failureReason) {
+bool BuildConvexHullBoundary(const std::vector<Vector2d>& points, std::vector<std::size_t>& hull) {
     // Start with an empty result so a failed call cannot leave old hull points behind.
     hull.clear();
-    if (points.size() < 3) {
-        failureReason = "fewer than three input points";
-        return false;
-    }
+    if (points.size() < 3) return false;
 
     // Sort point numbers, not the points themselves. This puts every point in a known
     // left-to-right order so the two scans below can trace the bottom and top outlines.
@@ -544,7 +383,6 @@ bool BuildConvexHullBoundary(const std::vector<Vector2d>& points, std::vector<st
         const Vector2d& previous = points[sorted[i - 1]];
         const Vector2d& current = points[sorted[i]];
         if (previous.x == current.x && previous.y == current.y) {
-            failureReason = "input contains coincident points";
             return false;
         }
     }
@@ -575,10 +413,7 @@ bool BuildConvexHullBoundary(const std::vector<Vector2d>& points, std::vector<st
     lower.pop_back();
     upper.pop_back();
     lower.insert(lower.end(), upper.begin(), upper.end());
-    if (lower.size() < 3) {
-        failureReason = "all input points are collinear";
-        return false;
-    }
+    if (lower.size() < 3) return false;
 
     // The scans above keep only the corners. Now add back input points that lie between
     // two corners on a straight outside edge, so those boundary vertices are not lost.
@@ -621,193 +456,67 @@ bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
 
 // Add interior points one at a time, replacing triangles whose circles contain each point.
 // The real convex hull remains the mesh boundary throughout cavity removal.
-std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vector<Vector2d>& points,
-    std::string& diagnosticTrace) {
-    std::ostringstream trace;
-    trace << std::setprecision(17);
+std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vector<Vector2d>& points) {
     points = input;
-    trace << "Bowyer-Watson input points (index: x,y), count=" << points.size() << ":\n";
-    for (std::size_t pointIndex = 0; pointIndex < points.size(); ++pointIndex)
-        trace << "  p" << pointIndex << "=(" << points[pointIndex].x << "," << points[pointIndex].y << ")\n";
-    if (points.size() < 3) {
-        trace << "RETURN: fewer than three input points\n";
-        diagnosticTrace = trace.str();
-        return {};
-    }
+    if (points.size() < 3) return {};
     double minimumX = points[0].x, maximumX = minimumX, minimumY = points[0].y, maximumY = minimumY;
     for (const Vector2d& p : points) {
         minimumX = std::min(minimumX, p.x); maximumX = std::max(maximumX, p.x);
         minimumY = std::min(minimumY, p.y); maximumY = std::max(maximumY, p.y);
     }
     const double boundingBoxSpan = std::max(maximumX - minimumX, maximumY - minimumY);
-    trace << "input bounds: min=(" << minimumX << "," << minimumY << ") max=(" << maximumX << "," << maximumY
-        << ") span=" << boundingBoxSpan << "\n";
-    if (!std::isfinite(boundingBoxSpan) || boundingBoxSpan <= 0.0) {
-        trace << "RETURN: invalid or zero bounding-box span\n";
-        diagnosticTrace = trace.str();
-        return {};
-    }
+    if (!std::isfinite(boundingBoxSpan) || boundingBoxSpan <= 0.0) return {};
     const std::size_t n = points.size();
     TriangleMesh triangleMesh;
 
-    auto writeTriangle = [&](std::size_t triangleIndex, const Triangle& triangle) {
-        trace << "t" << triangleIndex << "=[";
-        for (std::size_t vertexSlot = 0; vertexSlot < triangle.size(); ++vertexSlot) {
-            if (vertexSlot != 0) trace << ", ";
-            const std::size_t vertex = triangle[vertexSlot];
-            trace << vertex << "=(" << points[vertex].x << "," << points[vertex].y << ")";
-        }
-        trace << "]";
-    };
-    auto writeLiveMesh = [&](const char* label) {
-        trace << label << " (hasValidTopology=" << (triangleMesh.hasValidTopology ? "true" : "false") << "):\n";
-        for (std::size_t triangleIndex = 0; triangleIndex < triangleMesh.triangles.size(); ++triangleIndex) {
-            const StoredTriangle& stored = triangleMesh.triangles[triangleIndex];
-            if (!stored.isPresent) continue;
-            trace << "  ";
-            writeTriangle(triangleIndex, stored.vertexIndices);
-            trace << "\n";
-        }
-        trace << "  live edge records:\n";
-        for (const auto& [edge, uses] : triangleMesh.trianglesByEdge) {
-            trace << "    edge " << edge[0] << "=(" << points[edge[0]].x << "," << points[edge[0]].y << ") -- "
-                << edge[1] << "=(" << points[edge[1]].x << "," << points[edge[1]].y << ") uses="
-                << uses.triangleCount << " triangles=";
-            for (std::size_t useIndex = 0; useIndex < uses.triangleCount; ++useIndex) {
-                if (useIndex != 0) trace << ",";
-                trace << uses.triangles[useIndex].triangleIndex;
-            }
-            trace << "\n";
-        }
-    };
-
     std::vector<std::size_t> hull;
-    std::string hullFailureReason;
-    if (!BuildConvexHullBoundary(points, hull, hullFailureReason)) {
-        trace << "RETURN: could not build real convex hull: " << hullFailureReason << "\n";
-        diagnosticTrace = trace.str();
-        return {};
-    }
-    trace << "real convex hull boundary (counterclockwise, index: x,y), count=" << hull.size() << ":\n";
-    for (std::size_t vertex : hull)
-        trace << "  p" << vertex << "=(" << points[vertex].x << "," << points[vertex].y << ")\n";
+    if (!BuildConvexHullBoundary(points, hull)) return {};
 
     std::vector<Triangle> hullTriangles;
-    std::string hullTriangulationFailure;
-    if (!TriangulateSimplePolygon(hull, points, hullTriangles, hullTriangulationFailure)) {
-        trace << "RETURN: could not triangulate real convex hull: " << hullTriangulationFailure << "\n";
-        diagnosticTrace = trace.str();
-        return {};
-    }
-    trace << "real hull seed triangles (count=" << hullTriangles.size() << "):\n";
-    for (std::size_t triangleIndex = 0; triangleIndex < hullTriangles.size(); ++triangleIndex) {
-        trace << "  ";
-        writeTriangle(triangleIndex, hullTriangles[triangleIndex]);
-        trace << "\n";
-        if (!AddTriangle(triangleMesh, hullTriangles[triangleIndex])) {
-            trace << "RETURN: hull seed faces could not form valid adjacency\n";
-            diagnosticTrace = trace.str();
-            return {};
-        }
-    }
+    if (!TriangulateSimplePolygon(hull, points, hullTriangles)) return {};
+    for (const Triangle& triangle : hullTriangles)
+        if (!AddTriangle(triangleMesh, triangle)) return {};
     const std::set<Edge> noFixedConstraints;
-    if (!Legalize(triangleMesh, points, noFixedConstraints)) {
-        trace << "RETURN: real hull seed legalization did not converge\n";
-        diagnosticTrace = trace.str();
-        return {};
-    }
+    if (!Legalize(triangleMesh, points, noFixedConstraints)) return {};
     std::vector<bool> isHullVertex(n, false);
     for (std::size_t vertex : hull) isHullVertex[vertex] = true;
-    writeLiveMesh("mesh after real hull seed legalization and before interior insertions");
 
     // Point insertion: remove triangles whose circumcircles contain the point, then fill the cavity
     // from edges that occur only once on the removed triangles' boundary.
     for (std::size_t pointIndex = 0; pointIndex < n; ++pointIndex) {
-        if (isHullVertex[pointIndex]) {
-            trace << "\nSKIP p" << pointIndex << " because it is already in the real hull seed\n";
-            continue;
-        }
-        trace << "\nINSERT p" << pointIndex << "=(" << points[pointIndex].x << "," << points[pointIndex].y
-            << ") stored_triangle_slots=" << triangleMesh.triangles.size() << "\n";
+        if (isHullVertex[pointIndex]) continue;
         std::vector<bool> trianglesToRemove(triangleMesh.triangles.size(), false);
         std::map<Edge, int> boundaryEdgeCounts;
         bool foundCavityTriangle = false;
         for (std::size_t triangleIndex = 0; triangleIndex < triangleMesh.triangles.size(); ++triangleIndex) {
             if (!triangleMesh.triangles[triangleIndex].isPresent) continue;
             const Triangle& t = triangleMesh.triangles[triangleIndex].vertexIndices;
-            const double inBallValue = InBall(points[t[0]], points[t[1]], points[t[2]], points[pointIndex]);
-            const bool removeTriangle = inBallValue > 0.0;
-            trace << "  in-circle test ";
-            writeTriangle(triangleIndex, t);
-            trace << " against p" << pointIndex << " result=" << inBallValue
-                << " remove=" << (removeTriangle ? "true" : "false") << "\n";
-            if (removeTriangle) {
+            if (InBall(points[t[0]], points[t[1]], points[t[2]], points[pointIndex]) > 0.0) {
                 trianglesToRemove[triangleIndex] = true; foundCavityTriangle = true;
                 for (int edgeIndex = 0; edgeIndex < 3; ++edgeIndex) ++boundaryEdgeCounts[MakeEdge(t[edgeIndex], t[(edgeIndex + 1) % 3])];
             }
         }
-        trace << "  cavity_found=" << (foundCavityTriangle ? "true" : "false") << "\n";
-        if (!foundCavityTriangle) {
-            trace << "  no triangle selected; Bowyer-Watson skips this input point\n";
-            writeLiveMesh("mesh after skipped input point");
-            continue;
-        }
-        trace << "  selected triangles for removal:\n";
-        for (std::size_t triangleIndex = 0; triangleIndex < trianglesToRemove.size(); ++triangleIndex) {
-            if (!trianglesToRemove[triangleIndex]) continue;
-            trace << "    ";
-            writeTriangle(triangleIndex, triangleMesh.triangles[triangleIndex].vertexIndices);
-            trace << "\n";
-        }
-        trace << "  cavity edge counts:\n";
-        for (const auto& [edge, count] : boundaryEdgeCounts)
-            trace << "    edge " << edge[0] << "=(" << points[edge[0]].x << "," << points[edge[0]].y << ") -- "
-                << edge[1] << "=(" << points[edge[1]].x << "," << points[edge[1]].y << ") count=" << count
-                << (count == 1 ? " boundary" : " internal") << "\n";
+        if (!foundCavityTriangle) continue;
         for (std::size_t triangleIndex = 0; triangleIndex < trianglesToRemove.size(); ++triangleIndex)
             if (trianglesToRemove[triangleIndex]) RemoveTriangle(triangleMesh, triangleIndex);
-        trace << "  new faces from cavity boundary:\n";
         for (const auto& [edge, count] : boundaryEdgeCounts) if (count == 1) {
             Triangle t = Ccw({edge[0], edge[1], pointIndex}, points);
-            const double orientation = Orient(points[t[0]], points[t[1]], points[t[2]]);
-            const std::size_t candidateTriangleIndex = triangleMesh.triangles.size();
-            bool added = false;
-            if (orientation != 0.0) added = AddTriangle(triangleMesh, t);
-            trace << "    ";
-            writeTriangle(candidateTriangleIndex, t);
-            trace << " orient=" << orientation << " added=" << (added ? "true" : "false") << "\n";
+            if (Orient(points[t[0]], points[t[1]], points[t[2]]) != 0.0) AddTriangle(triangleMesh, t);
         }
-        writeLiveMesh("mesh after input insertion");
-        if (!triangleMesh.hasValidTopology) {
-            trace << "  stopping insertion loop because mesh topology became invalid\n";
-            break;
-        }
+        if (!triangleMesh.hasValidTopology) break;
     }
     std::vector<Triangle> triangles;
-    trace << "\nreal mesh after all input insertions:\n";
-    for (std::size_t triangleIndex = 0; triangleIndex < triangleMesh.triangles.size(); ++triangleIndex) {
-        const StoredTriangle& triangle = triangleMesh.triangles[triangleIndex];
+    for (const StoredTriangle& triangle : triangleMesh.triangles) {
         if (!triangle.isPresent) continue;
-        trace << "  ";
-        writeTriangle(triangleIndex, triangle.vertexIndices);
-        trace << "\n";
         triangles.push_back(triangle.vertexIndices);
     }
-    trace << "\nraw triangles returned by Bowyer-Watson (count=" << triangles.size() << "):\n";
-    for (std::size_t triangleIndex = 0; triangleIndex < triangles.size(); ++triangleIndex) {
-        trace << "  ";
-        writeTriangle(triangleIndex, triangles[triangleIndex]);
-        trace << "\n";
-    }
-    trace << "Bowyer-Watson return topology=" << (triangleMesh.hasValidTopology ? "valid" : "invalid") << "\n";
-    diagnosticTrace = trace.str();
     return triangleMesh.hasValidTopology ? triangles : std::vector<Triangle>{};
 }
 
 // Add a required loop edge by repeatedly flipping mesh edges that cross it.
 // Stop when the edge exists or no allowed flip can make progress.
 bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
-    const std::vector<Vector2d>& points, std::set<Edge>& fixedConstraintEdges, std::string& failureReason) {
+    const std::vector<Vector2d>& points, std::set<Edge>& fixedConstraintEdges) {
     std::vector<std::size_t> splitPoints{constraint[0], constraint[1]};
     for (std::size_t i = 0; i < points.size(); ++i)
         if (i != constraint[0] && i != constraint[1] && OnSegment(points[constraint[0]], points[constraint[1]], points[i]))
@@ -821,11 +530,7 @@ bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
     splitPoints.erase(std::unique(splitPoints.begin(), splitPoints.end()), splitPoints.end());
     for (std::size_t i = 1; i < splitPoints.size(); ++i) {
         const Edge segment = MakeEdge(splitPoints[i - 1], splitPoints[i]);
-        if (!RecoverConstraintSingle(segment, triangleMesh, points, fixedConstraintEdges, failureReason)) {
-            failureReason = "subsegment [" + std::to_string(segment[0]) + ", " + std::to_string(segment[1]) +
-                "]: " + failureReason;
-            return false;
-        }
+        if (!RecoverConstraintSingle(segment, triangleMesh, points, fixedConstraintEdges)) return false;
     }
     return true;
 }
@@ -880,39 +585,23 @@ bool BuildConstrainedTriangulation(const InputGeometry& input, const std::set<Ed
     std::vector<Triangle>& triangles, std::string& error) {
     // Build the initial triangulation, recover constraints, and legalize unconstrained edges in order.
     std::vector<Vector2d> points;
-    std::string bowyerWatsonTrace;
-    std::vector<Triangle> initialTriangles = BowyerWatson(input.points, points, bowyerWatsonTrace);
+    std::vector<Triangle> initialTriangles = BowyerWatson(input.points, points);
     if (initialTriangles.empty()) {
-        error = "Could not triangulate input vertices.\n\n" + bowyerWatsonTrace;
+        error = "Could not triangulate input vertices.";
         return false;
     }
     TriangleMesh triangleMesh;
     for (const Triangle& triangle : initialTriangles) {
         if (!AddTriangle(triangleMesh, triangle)) {
-            error = "Bowyer-Watson faces could not form valid adjacency.\n\n" + bowyerWatsonTrace;
+            error = "Bowyer-Watson faces could not form valid adjacency.";
             return false;
         }
     }
-    std::map<Edge, std::pair<bool, std::size_t>> initialConstraintStatus;
-    for (const Edge& edge : constraints)
-        initialConstraintStatus.emplace(edge, std::pair{HasEdge(triangleMesh, edge),
-            CountProperCrossingEdges(edge, triangleMesh, points)});
 
     std::set<Edge> fixedConstraintEdges;
     for (const Edge& edge : constraints) {
-        std::string failureReason;
-        if (!RecoverConstraint(edge, triangleMesh, points, fixedConstraintEdges, failureReason)) {
-            const auto [initiallyPresent, initialCrossings] = initialConstraintStatus.at(edge);
-            error = "Could not recover contour constraint [" + std::to_string(edge[0]) + ", " +
-                std::to_string(edge[1]) + "]: " + failureReason + " (initial seed: raw_triangle_edge_present=" +
-                (TrianglesContainEdge(edge, initialTriangles) ? "true" : "false") + ", edge_map_present=" +
-                (initiallyPresent ? "true" : "false") + ", raw_endpoint_triangles=" +
-                DescribeRawEndpointTriangles(edge, initialTriangles, points) + ", proper_crossings=" +
-                std::to_string(initialCrossings) + ", current_endpoint_incident_edges=" +
-                std::to_string(CountIncidentEdges(edge[0], triangleMesh)) + "/" +
-                std::to_string(CountIncidentEdges(edge[1], triangleMesh)) + "), local mesh vertices: " +
-                DescribeConstraintNeighborhood(edge, triangleMesh, points) +
-                "\n\n" + bowyerWatsonTrace;
+        if (!RecoverConstraint(edge, triangleMesh, points, fixedConstraintEdges)) {
+            error = "Could not recover every contour constraint.";
             return false;
         }
     }
