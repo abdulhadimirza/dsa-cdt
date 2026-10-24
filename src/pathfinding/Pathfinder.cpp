@@ -14,15 +14,14 @@ namespace {
 // Portal endpoints are stored in travel-left/travel-right order for funnel tightening.
 struct Portal { Vector2d left; Vector2d right; };
 
-// Use triangle centroids as graph nodes for A* edge costs and its Euclidean heuristic.
+/// Returns a triangle's centroid for corridor-search edge costs and heuristic estimates.
 Vector2d Centroid(const NavMesh& mesh, const MeshTriangle& triangle) {
     const auto& vertices = mesh.Vertices();
     return (vertices[triangle.vertices[0]].position + vertices[triangle.vertices[1]].position +
         vertices[triangle.vertices[2]].position) / 3.0;
 }
 
-// Mesh faces are counterclockwise; the small cross-product tolerance includes edge points
-// so a valid endpoint on a shared edge can be assigned to either traversable face.
+/// Tests a point against a counterclockwise triangle, including points within edge tolerance.
 bool ContainsPoint(const NavMesh& mesh, const MeshTriangle& triangle, Vector2d point) {
     const auto& vertices = mesh.Vertices();
     const Vector2d a = vertices[triangle.vertices[0]].position;
@@ -34,7 +33,7 @@ bool ContainsPoint(const NavMesh& mesh, const MeshTriangle& triangle, Vector2d p
         geometry::Cross2D(a - c, point - c) >= -edgeTolerance;
 }
 
-// Search only traversable faces; immutable NavMesh topology guarantees all indices are valid.
+/// Returns the first traversable triangle containing the point, if any.
 std::optional<std::size_t> FindContainingTriangle(const NavMesh& mesh, Vector2d point) {
     for (std::size_t i = 0; i < mesh.Triangles().size(); ++i) {
         const auto& triangle = mesh.Triangles()[i];
@@ -43,7 +42,7 @@ std::optional<std::size_t> FindContainingTriangle(const NavMesh& mesh, Vector2d 
     return std::nullopt;
 }
 
-/// A* over validated triangle adjacency; returns empty only when no traversable corridor exists.
+/// Finds a minimum-cost traversable triangle corridor with A*; returns empty when disconnected.
 std::optional<std::vector<std::size_t>> FindCorridor(
     const NavMesh& mesh, std::size_t start, std::size_t goal, Vector2d destination) {
     const std::size_t count = mesh.Triangles().size();
@@ -83,7 +82,7 @@ std::optional<std::vector<std::size_t>> FindCorridor(
     return corridor;
 }
 
-/// Convert consecutive corridor faces into shared-edge portals oriented for the funnel.
+/// Converts consecutive corridor faces into shared-edge portals ordered for funnel smoothing.
 std::vector<Portal> BuildPortals(const NavMesh& mesh, const std::vector<std::size_t>& corridor,
     Vector2d start, Vector2d goal) {
     std::vector<Portal> portals{{start, start}};
@@ -102,8 +101,7 @@ std::vector<Portal> BuildPortals(const NavMesh& mesh, const std::vector<std::siz
     return portals;
 }
 
-/// Tighten the left/right funnel bounds; when they cross, emit the opposite bound as a corner
-/// and restart from that portal so the route stays inside the entire corridor.
+/// Tightens funnel bounds and emits corridor corners when the bounds cross.
 std::vector<Vector2d> SmoothPath(const std::vector<Portal>& portals, Vector2d start, Vector2d goal) {
     std::vector<Vector2d> waypoints{start};
     Vector2d tip = start, left = portals[0].left, right = portals[0].right;
@@ -137,8 +135,8 @@ std::vector<Vector2d> SmoothPath(const std::vector<Portal>& portals, Vector2d st
 }
 }
 
+/// Locates both endpoints, finds their traversable corridor, and returns its smoothed route.
 PathResult FindPath(const NavMesh& mesh, Vector2d start, Vector2d goal) {
-    // Resolve endpoint status first, then keep the discrete corridor and its smoothed route together.
     PathResult result;
     const auto startTriangle = FindContainingTriangle(mesh, start);
     if (!startTriangle) { result.status = PathStatus::StartOutsideMesh; return result; }

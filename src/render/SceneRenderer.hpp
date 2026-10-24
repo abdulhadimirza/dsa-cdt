@@ -3,8 +3,8 @@
 #include "editor/EditorState.hpp"
 #include "cdt/ConstrainedDelaunay.hpp"
 #include "model/GeometryModel.hpp"
+#include "pathfinding/PathfindingView.hpp"
 #include "validation/GeometryValidator.hpp"
-#include "pathfinding/Pathfinder.hpp"
 #include "raylib.h"
 
 namespace cdt {
@@ -16,10 +16,10 @@ struct RenderOptions {
 
 class SceneRenderer {
 public:
-    /// Draw the editable model with validation diagnostics and an optional immutable baked mesh.
+    /// Draws geometry, diagnostics, the accepted mesh, and a read-only pathfinding view in world space.
     void DrawWorld(const GeometryModel& model, const GeometryValidationReport& validation, const EditorState& editor,
         const RenderOptions& options, const NavMesh* mesh,
-        const std::optional<pathfinding::PathResult>& path) const;
+        const pathfinding::PathfindingView& pathfinding) const;
     /// Draw screen-space labels and editor status overlays.
     void DrawOverlays(const GeometryModel& model, const RenderOptions& options,
         const Camera2D& camera, const EditorState& editor) const;

@@ -6,17 +6,16 @@
 #include "app/NavmeshBakeCoordinator.hpp"
 #include "app/NavmeshBakeSession.hpp"
 #include "app/NavmeshInputKey.hpp"
+#include "app/PathfindingSession.hpp"
 #include "cdt/ConstrainedDelaunay.hpp"
 #include "editor/EditorController.hpp"
 #include "model/GeometryModel.hpp"
-#include "pathfinding/Pathfinder.hpp"
 #include "render/SceneRenderer.hpp"
 #include "validation/GeometryValidator.hpp"
 #include "ui/ControlPanel.hpp"
 
 #include <algorithm>
 #include <iostream>
-#include <optional>
 #include <string>
 
 namespace {
@@ -25,8 +24,30 @@ constexpr int screen_width = 1280;
 constexpr int screen_height = 800;
 constexpr Color background_color{22, 25, 32, 255};
 
+/// Interprets navigation-tool canvas clicks and updates path state and editor feedback.
+void DispatchNavigationClick(const cdt::CanvasClick& click, cdt::EditorController& editor,
+    cdt::PathfindingSession& pathfinding, const cdt::NavMesh* mesh, bool auto_update) {
+    cdt::PathEndpoint endpoint = cdt::PathEndpoint::Start;
+    const char* status = nullptr;
+    switch (click.tool) {
+        case cdt::EditorTool::Start:
+            endpoint = cdt::PathEndpoint::Start;
+            status = "Start point set.";
+            break;
+        case cdt::EditorTool::Goal:
+            endpoint = cdt::PathEndpoint::Goal;
+            status = "Goal point set.";
+            break;
+        default:
+            return;
+    }
+    pathfinding.SetEndpoint(endpoint, click.world_position, mesh, auto_update);
+    editor.SetStatusMessage(status);
+}
+
 } // namespace
 
+/// Runs the editor, asynchronous bake, navigation session, rendering, and UI request loop.
 int main() {
     SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     InitWindow(screen_width, screen_height, "DCDT Simulation - Infinite Canvas");
@@ -41,8 +62,8 @@ int main() {
     cdt::GeometryValidator validator;
     cdt::NavmeshBakeCoordinator bake_coordinator;
     cdt::NavmeshBakeSession bake_session;
+    cdt::PathfindingSession pathfinding_session;
     cdt::ControlPanel control_panel;
-    std::optional<cdt::pathfinding::PathResult> path_result;
     double agent_radius = 0.0;
 
     while (!WindowShouldClose()) {
@@ -62,12 +83,7 @@ int main() {
         editor_input.left_released = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
         editor_input.right_pressed = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
         editor_input.escape_pressed = IsKeyPressed(KEY_ESCAPE);
-        const auto previous_start = editor.State().start_point;
-        const auto previous_goal = editor.State().goal_point;
-        editor.Update(editor_input, geometry);
-        const bool endpoints_changed = previous_start != editor.State().start_point ||
-            previous_goal != editor.State().goal_point;
-        if (endpoints_changed) path_result.reset();
+        const auto canvas_click = editor.Update(editor_input, geometry);
         const cdt::GeometryValidationReport validation = validator.Validate(geometry);
         const std::string input_key = cdt::MakeNavmeshInputKey(validation.validated_navmesh_input, agent_radius);
 
@@ -79,16 +95,14 @@ int main() {
                 std::cerr << "Navmesh generation failed: " << completion->result.message << '\n';
         }
 
-        // Recompute before drawing so the previous route remains visible until its replacement is ready.
-        if (endpoints_changed || mesh_replaced) {
-            if (control_panel.AutoUpdatePath() && bake_session.baked_mesh &&
-                editor.State().start_point && editor.State().goal_point) {
-                path_result = cdt::pathfinding::FindPath(*bake_session.baked_mesh,
-                    *editor.State().start_point, *editor.State().goal_point);
-            } else {
-                path_result.reset();
-            }
-        }
+        const cdt::NavMesh* accepted_mesh = bake_session.baked_mesh ? &*bake_session.baked_mesh : nullptr;
+        if (canvas_click)
+            DispatchNavigationClick(*canvas_click, editor, pathfinding_session, accepted_mesh,
+                control_panel.AutoUpdatePath() && !mesh_replaced);
+        if (mesh_replaced && bake_session.baked_mesh)
+            pathfinding_session.OnMeshAccepted(*bake_session.baked_mesh, control_panel.AutoUpdatePath());
+
+        const cdt::pathfinding::PathfindingView pathfinding_view = pathfinding_session.View();
 
         // Rendering uses the accepted mesh while validation report drives live loop diagnostics.
         BeginDrawing();
@@ -97,16 +111,27 @@ int main() {
         camera.DrawWorldGrid();
         renderer.DrawWorld(geometry, validation, editor.State(),
             control_panel.Options(), bake_session.baked_mesh.has_value() ? &*bake_session.baked_mesh : nullptr,
-            path_result);
+            pathfinding_view);
         EndMode2D();
 
         renderer.DrawOverlays(geometry, control_panel.Options(), camera.GetCamera(), editor.State());
         rlImGuiBegin();
-        const cdt::ControlRequests requests = control_panel.Draw(
-            camera.GetCamera(), mouse_screen, mouse_world, geometry, editor.State(),
-            bake_session.baked_mesh.has_value(), bake_session.bake_attempted, bake_session.last_bake_status,
-            bake_session.baked_mesh.has_value() && input_key != bake_session.baked_input_key, bake_coordinator.IsRunning(),
-            path_result);
+        const cdt::ControlPanelContext panel_context{
+            .camera = camera.GetCamera(),
+            .mouse_screen = mouse_screen,
+            .mouse_world = mouse_world,
+            .model = geometry,
+            .editor = editor.State(),
+            .bake = {
+                .has_baked_mesh = bake_session.baked_mesh.has_value(),
+                .attempted = bake_session.bake_attempted,
+                .last_status = bake_session.last_bake_status,
+                .out_of_date = bake_session.baked_mesh.has_value() && input_key != bake_session.baked_input_key,
+                .running = bake_coordinator.IsRunning(),
+            },
+            .pathfinding = pathfinding_view,
+        };
+        const cdt::ControlRequests requests = control_panel.Draw(panel_context);
         if (requests.agent_radius) agent_radius = *requests.agent_radius;
         // Recompute after UI input so a radius edit changes the request key immediately.
         const std::string bake_input_key = cdt::MakeNavmeshInputKey(validation.validated_navmesh_input, agent_radius);
@@ -122,17 +147,15 @@ int main() {
         }
         if (requests.delete_navmesh) {
             bake_session.baked_mesh.reset();
-            path_result.reset();
+            pathfinding_session.ClearForMeshDeletion();
         }
         if (requests.clear_geometry) {
             geometry.Clear();
             editor.ClearInteraction();
         }
 
-        if (requests.generate_path && bake_session.baked_mesh &&
-            editor.State().start_point && editor.State().goal_point)
-            path_result = cdt::pathfinding::FindPath(*bake_session.baked_mesh,
-                *editor.State().start_point, *editor.State().goal_point);
+        if (requests.generate_path && bake_session.baked_mesh)
+            pathfinding_session.Generate(*bake_session.baked_mesh);
 
         if (control_panel.AutoBakeNavmesh() && bake_session.baked_mesh && bake_input_key != bake_session.baked_input_key &&
             bake_input_key != bake_session.last_auto_requested_key) {

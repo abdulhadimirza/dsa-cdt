@@ -24,16 +24,46 @@ constexpr Color edge_preview_color{220, 235, 245, 170};
 constexpr Color chain_move_color{90, 235, 185, 230};
 constexpr Color traversable_mesh_edge{100, 195, 255, 235};
 constexpr Color obstacle_mesh_edge{255, 155, 75, 245};
+constexpr Color path_line_color{255, 225, 80, 255};
+constexpr Color path_waypoint_color{255, 245, 170, 255};
+constexpr Color start_marker_color{70, 220, 125, 255};
+constexpr Color goal_marker_color{255, 105, 95, 255};
 
+/// Converts a double-precision world position to raylib's float vector representation.
 Vector2 ToRaylib(Vector2d position) {
     return Vector2{static_cast<float>(position.x), static_cast<float>(position.y)};
 }
 
+/// Draws the successful route and its waypoints from a read-only pathfinding view.
+void DrawPath(const pathfinding::PathfindingView& view) {
+    const auto& result = view.result;
+    if (!result || result->status != pathfinding::PathStatus::Success) return;
+    for (std::size_t i = 1; i < result->waypoints.size(); ++i)
+        DrawLineEx(ToRaylib(result->waypoints[i - 1]), ToRaylib(result->waypoints[i]), 4.0f, path_line_color);
+    for (const Vector2d waypoint : result->waypoints)
+        DrawCircleV(ToRaylib(waypoint), 4.0f, path_waypoint_color);
+}
+
+/// Draws one labeled endpoint marker using the supplied role-specific color.
+void DrawEndpoint(Vector2d position, const char* label, Color marker_color, int label_offset) {
+    const Vector2 point = ToRaylib(position);
+    DrawCircleV(point, 11.0f, point_outer_color);
+    DrawCircleV(point, 7.0f, marker_color);
+    DrawText(label, static_cast<int>(point.x) + label_offset, static_cast<int>(point.y) - 8, 16, point_outer_color);
+}
+
+/// Draws whichever endpoint markers are present in the current view.
+void DrawEndpoints(const pathfinding::PathfindingView& pathfinding) {
+    if (pathfinding.start) DrawEndpoint(*pathfinding.start, "S", start_marker_color, -4);
+    if (pathfinding.goal) DrawEndpoint(*pathfinding.goal, "G", goal_marker_color, -5);
+}
+
 } // namespace
 
+/// Renders world-space geometry, validation feedback, a baked mesh, and the pathfinding overlay.
 void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidationReport& validation,
     const EditorState& editor, const RenderOptions& options, const NavMesh* mesh,
-    const std::optional<pathfinding::PathResult>& path) const {
+    const pathfinding::PathfindingView& pathfinding) const {
     // Diagnostics are indexed in model-loop order by GeometryValidationReport.
     if (mesh) for (const MeshTriangle& triangle : mesh->Triangles()) {
         const Vector2 a = ToRaylib(mesh->Vertices()[triangle.vertices[0]].position);
@@ -46,24 +76,8 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidati
         DrawLineEx(b, c, 1.5f, edge);
         DrawLineEx(c, a, 1.5f, edge);
     }
-    if (path && path->status == pathfinding::PathStatus::Success) {
-        for (std::size_t i = 1; i < path->waypoints.size(); ++i)
-            DrawLineEx(ToRaylib(path->waypoints[i - 1]), ToRaylib(path->waypoints[i]), 4.0f, Color{255, 225, 80, 255});
-        for (const Vector2d waypoint : path->waypoints)
-            DrawCircleV(ToRaylib(waypoint), 4.0f, Color{255, 245, 170, 255});
-    }
-    if (editor.start_point) {
-        const Vector2 start = ToRaylib(*editor.start_point);
-        DrawCircleV(start, 11.0f, Color{15, 18, 24, 255});
-        DrawCircleV(start, 7.0f, Color{70, 220, 125, 255});
-        DrawText("S", static_cast<int>(start.x) - 4, static_cast<int>(start.y) - 8, 16, Color{15, 18, 24, 255});
-    }
-    if (editor.goal_point) {
-        const Vector2 goal = ToRaylib(*editor.goal_point);
-        DrawCircleV(goal, 11.0f, Color{15, 18, 24, 255});
-        DrawCircleV(goal, 7.0f, Color{255, 105, 95, 255});
-        DrawText("G", static_cast<int>(goal.x) - 5, static_cast<int>(goal.y) - 8, 16, Color{15, 18, 24, 255});
-    }
+    DrawPath(pathfinding);
+    DrawEndpoints(pathfinding);
     const std::unordered_set<VertexId> moving_chain_vertices(
         editor.chain_move_vertices.begin(), editor.chain_move_vertices.end());
     const auto is_loop_edge = [&model](const GeometryEdge& edge) {
@@ -130,6 +144,7 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidati
     }
 }
 
+/// Renders screen-space coordinate labels, navigation help, and editor status feedback.
 void SceneRenderer::DrawOverlays(const GeometryModel& model, const RenderOptions& options,
     const Camera2D& camera, const EditorState& editor) const {
     if (options.show_coordinates) {

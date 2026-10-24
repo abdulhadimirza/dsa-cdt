@@ -1,0 +1,44 @@
+#include "app/PathfindingSession.hpp"
+
+namespace cdt {
+
+/// Stores a changed endpoint and invalidates or refreshes the current route as configured.
+void PathfindingSession::SetEndpoint(PathEndpoint endpoint, Vector2d position, const NavMesh* mesh, bool auto_update) {
+    auto& point = endpoint == PathEndpoint::Start ? start : goal;
+    if (point == position) return;
+    point = position;
+    result.reset();
+    UpdateIfEnabled(mesh, auto_update);
+}
+
+/// Refreshes the route when a successful bake replaces the accepted navmesh.
+void PathfindingSession::OnMeshAccepted(const NavMesh& mesh, bool auto_update) {
+    result.reset();
+    UpdateIfEnabled(&mesh, auto_update);
+}
+
+/// Calculates a route for the current endpoints using the supplied baked mesh.
+void PathfindingSession::Generate(const NavMesh& mesh) {
+    if (!start || !goal) {
+        result.reset();
+        return;
+    }
+    Recompute(mesh);
+}
+
+/// Drops the route result when its accepted mesh is removed.
+void PathfindingSession::ClearForMeshDeletion() noexcept {
+    result.reset();
+}
+
+/// Recomputes only when auto-update is enabled and a mesh and both endpoints are available.
+void PathfindingSession::UpdateIfEnabled(const NavMesh* mesh, bool auto_update) {
+    if (auto_update && mesh && start && goal) Recompute(*mesh);
+}
+
+/// Stores the pathfinder result for the current endpoint pair.
+void PathfindingSession::Recompute(const NavMesh& mesh) {
+    result = pathfinding::FindPath(mesh, *start, *goal);
+}
+
+} // namespace cdt

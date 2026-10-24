@@ -1,7 +1,10 @@
 #include "editor/EditorController.hpp"
 
+#include <utility>
+
 namespace cdt {
 
+/// Returns the closest vertex at or within the world-space radius, if one exists.
 std::optional<VertexId> EditorController::PickVertex(
     const GeometryModel& model, Vector2d cursor, double radius) noexcept {
     const double max_distance_sq = radius * radius;
@@ -17,6 +20,7 @@ std::optional<VertexId> EditorController::PickVertex(
     return closest;
 }
 
+/// Resets transient editor interaction state without changing geometry or the selected tool.
 void EditorController::ClearInteraction() noexcept {
     state.hovered_vertex.reset();
     state.dragged_vertex.reset();
@@ -26,6 +30,7 @@ void EditorController::ClearInteraction() noexcept {
     state.status_message.clear();
 }
 
+/// Applies the requested movement mode and cancels state that cannot carry across modes.
 void EditorController::SetEditBehavior(EditBehavior behavior) noexcept {
     if (state.edit_behavior == behavior) return;
     state.edit_behavior = behavior;
@@ -34,13 +39,15 @@ void EditorController::SetEditBehavior(EditBehavior behavior) noexcept {
     state.status_message.clear();
 }
 
+/// Selects a tool and cancels any interaction owned by the previous tool.
 void EditorController::SetTool(EditorTool tool) noexcept {
     if (state.active_tool == tool) return;
     state.active_tool = tool;
     ClearInteraction();
 }
 
-void EditorController::Update(const EditorInput& input, GeometryModel& model) {
+/// Applies input to the editor and returns a generic canvas click for app-level interpretation.
+std::optional<CanvasClick> EditorController::Update(const EditorInput& input, GeometryModel& model) {
     if (input.escape_pressed && state.active_tool != EditorTool::Edit) {
         state.edge_chain.clear();
     }
@@ -49,8 +56,12 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
         state.dragged_vertex.reset();
         state.drag_offset = {};
         state.chain_move_vertices.clear();
-        return;
+        return std::nullopt;
     }
+
+    const std::optional<CanvasClick> canvas_click = input.left_pressed
+        ? std::optional<CanvasClick>{CanvasClick{state.active_tool, input.cursor_world}}
+        : std::nullopt;
 
     if (state.dragged_vertex && !model.FindVertex(*state.dragged_vertex)) {
         state.dragged_vertex.reset();
@@ -58,21 +69,12 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
 
     if (state.active_tool == EditorTool::Start || state.active_tool == EditorTool::Goal) {
         state.hovered_vertex.reset();
-        if (input.left_pressed) {
-            if (state.active_tool == EditorTool::Start) {
-                state.start_point = input.cursor_world;
-                state.status_message = "Start point set.";
-            } else {
-                state.goal_point = input.cursor_world;
-                state.status_message = "Goal point set.";
-            }
-        }
-        return;
+        return canvas_click;
     }
 
     if (state.active_tool != EditorTool::Edit) {
         state.hovered_vertex = PickVertex(model, input.cursor_world, input.pick_radius_world);
-        if (input.escape_pressed) return;
+        if (input.escape_pressed) return canvas_click;
         if (input.left_pressed && state.hovered_vertex) {
             const VertexId selected = *state.hovered_vertex;
             if (state.edge_chain.empty()) {
@@ -89,7 +91,7 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
                 if (model.AddEdge(state.edge_chain.back(), selected, type)) state.edge_chain.push_back(selected);
             }
         }
-        return;
+        return canvas_click;
     }
 
     if (input.escape_pressed) state.status_message.clear();
@@ -138,6 +140,12 @@ void EditorController::Update(const EditorInput& input, GeometryModel& model) {
         if (target) (void)model.RemoveVertex(*target);
         ClearInteraction();
     }
+    return canvas_click;
+}
+
+/// Replaces the transient feedback text shown by editor-facing UI.
+void EditorController::SetStatusMessage(std::string message) {
+    state.status_message = std::move(message);
 }
 
 } // namespace cdt

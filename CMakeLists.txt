@@ -58,6 +58,7 @@ add_executable(${PROJECT_NAME}
     src/core/GeometryPredicates.cpp
     src/app/NavmeshBakeCoordinator.cpp
     src/app/NavmeshBakeSession.cpp
+    src/app/PathfindingSession.cpp
     src/app/NavmeshInputKey.cpp
     src/cdt/ConstrainedDelaunay.cpp
     # Walkable-region preparation and navmesh pipeline layers.

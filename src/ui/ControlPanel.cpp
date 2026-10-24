@@ -6,12 +6,57 @@
 #include <cmath>
 
 namespace cdt {
+namespace {
 
-ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
-    Vector2d mouse_world, const GeometryModel& model, const EditorState& editor,
-    bool has_baked_mesh, bool bake_attempted, GenerationStatus last_bake_status, bool mesh_out_of_date,
-    bool bake_running, const std::optional<pathfinding::PathResult>& path) {
+const ImVec4 path_success_color{0.3f, 0.9f, 0.5f, 1.0f};
+const ImVec4 path_failure_color{1.0f, 0.72f, 0.32f, 1.0f};
+const ImVec4 path_header_color{0.3f, 0.8f, 1.0f, 1.0f};
+
+} // namespace
+
+/// Draws endpoint values, route status, and path-generation controls from read-only data.
+void ControlPanel::DrawPathfindingControls(ControlRequests& requests,
+    const pathfinding::PathfindingView& view, bool has_baked_mesh) {
+    ImGui::TextColored(path_header_color, "Pathfinding");
+    if (view.start)
+        ImGui::Text("Start: (%.1f, %.1f)", view.start->x, view.start->y);
+    else ImGui::TextDisabled("Start: not set");
+    if (view.goal)
+        ImGui::Text("Goal: (%.1f, %.1f)", view.goal->x, view.goal->y);
+    else ImGui::TextDisabled("Goal: not set");
+    ImGui::Checkbox("Auto Update Path", &auto_update_path);
+    requests.generate_path = ImGui::Button("Generate Path", ImVec2(-1.0f, 24.0f)) &&
+        has_baked_mesh && view.start.has_value() && view.goal.has_value();
+    if (!has_baked_mesh || !view.start || !view.goal)
+        ImGui::TextDisabled("Requires a baked navmesh, start, and goal.");
+    if (view.result) {
+        const auto& path = *view.result;
+        switch (path.status) {
+            case pathfinding::PathStatus::Success:
+                ImGui::TextColored(path_success_color, "Path generated: %zu waypoints", path.waypoints.size());
+                break;
+            case pathfinding::PathStatus::StartOutsideMesh:
+                ImGui::TextColored(path_failure_color, "Path failed: start is outside traversable mesh.");
+                break;
+            case pathfinding::PathStatus::GoalOutsideMesh:
+                ImGui::TextColored(path_failure_color, "Path failed: goal is outside traversable mesh.");
+                break;
+            case pathfinding::PathStatus::NoPath:
+                ImGui::TextColored(path_failure_color, "Path failed: no traversable route.");
+                break;
+        }
+    }
+}
+
+/// Renders all control sections and returns user actions without applying them to app state.
+ControlRequests ControlPanel::Draw(const ControlPanelContext& context) {
     ControlRequests requests{};
+    const Camera2D& camera = context.camera;
+    const Vector2 mouse_screen = context.mouse_screen;
+    const Vector2d mouse_world = context.mouse_world;
+    const GeometryModel& model = context.model;
+    const EditorState& editor = context.editor;
+    const BakePanelView& bake = context.bake;
 
     ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(360.0f, 680.0f), ImGuiCond_FirstUseEver);
@@ -68,34 +113,7 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
         }
         requests.clear_geometry = ImGui::Button("Clear Geometry", ImVec2(-1.0f, 24.0f));
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Pathfinding");
-        if (editor.start_point)
-            ImGui::Text("Start: (%.1f, %.1f)", editor.start_point->x, editor.start_point->y);
-        else ImGui::TextDisabled("Start: not set");
-        if (editor.goal_point)
-            ImGui::Text("Goal: (%.1f, %.1f)", editor.goal_point->x, editor.goal_point->y);
-        else ImGui::TextDisabled("Goal: not set");
-        ImGui::Checkbox("Auto Update Path", &auto_update_path);
-        requests.generate_path = ImGui::Button("Generate Path", ImVec2(-1.0f, 24.0f)) &&
-            has_baked_mesh && editor.start_point.has_value() && editor.goal_point.has_value();
-        if (!has_baked_mesh || !editor.start_point || !editor.goal_point)
-            ImGui::TextDisabled("Requires a baked navmesh, start, and goal.");
-        if (path) {
-            switch (path->status) {
-                case pathfinding::PathStatus::Success:
-                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Path generated: %zu waypoints", path->waypoints.size());
-                    break;
-                case pathfinding::PathStatus::StartOutsideMesh:
-                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Path failed: start is outside traversable mesh.");
-                    break;
-                case pathfinding::PathStatus::GoalOutsideMesh:
-                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Path failed: goal is outside traversable mesh.");
-                    break;
-                case pathfinding::PathStatus::NoPath:
-                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Path failed: no traversable route.");
-                    break;
-            }
-        }
+        DrawPathfindingControls(requests, context.pathfinding, bake.has_baked_mesh);
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Navmesh Setup & Bake");
         double edited_radius = agent_radius;
@@ -107,11 +125,11 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
         requests.bake_navmesh = ImGui::Button("Bake Navmesh", ImVec2(-1.0f, 24.0f));
         requests.delete_navmesh = ImGui::Button("Delete Navmesh", ImVec2(-1.0f, 24.0f));
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Bake Status");
-        ImGui::Text("Stored mesh: %s", has_baked_mesh ? "yes" : "no");
-        if (bake_running) ImGui::Text("Bake: running / queued");
-        if (mesh_out_of_date) ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Mesh is out of date");
-        if (!bake_attempted) ImGui::TextDisabled("Last bake: not attempted");
-        else switch (last_bake_status) {
+        ImGui::Text("Stored mesh: %s", bake.has_baked_mesh ? "yes" : "no");
+        if (bake.running) ImGui::Text("Bake: running / queued");
+        if (bake.out_of_date) ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Mesh is out of date");
+        if (!bake.attempted) ImGui::TextDisabled("Last bake: not attempted");
+        else switch (bake.last_status) {
             case GenerationStatus::Success: ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Last bake: success"); break;
             case GenerationStatus::NoActiveBorder: ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Last bake: no active border"); break;
             case GenerationStatus::Failed: ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Last bake: failed"); break;
