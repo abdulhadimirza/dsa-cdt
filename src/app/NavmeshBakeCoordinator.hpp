@@ -3,7 +3,6 @@
 #include "cdt/ConstrainedDelaunay.hpp"
 #include "validation/GeometryValidator.hpp"
 
-#include <cstddef>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -46,7 +45,6 @@ private:
         std::string input_key;
         std::optional<ValidatedNavmeshInput> geometry;
         double agent_radius{};
-        std::size_t pendingReplacements{};
     };
     /// Worker loop: wait for a job, run the pipeline without holding the lock, then publish completion.
     void Run();
