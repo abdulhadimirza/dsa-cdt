@@ -519,17 +519,99 @@ bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Ve
     return true;
 }
 
-// Add points one at a time, replacing triangles whose circles contain each point with new triangles.
-// A large temporary triangle starts the process; it is removed before returning the mesh.
+// Build the convex hull in counterclockwise order, retaining every input point on its boundary.
+// The monotone-chain pass finds strict corners; points on each hull edge are then inserted in edge order.
+bool BuildConvexHullBoundary(const std::vector<Vector2d>& points, std::vector<std::size_t>& hull,
+    std::string& failureReason) {
+    hull.clear();
+    if (points.size() < 3) {
+        failureReason = "fewer than three input points";
+        return false;
+    }
+
+    std::vector<std::size_t> sorted(points.size());
+    for (std::size_t i = 0; i < sorted.size(); ++i) sorted[i] = i;
+    std::sort(sorted.begin(), sorted.end(), [&](std::size_t a, std::size_t b) {
+        if (points[a].x != points[b].x) return points[a].x < points[b].x;
+        if (points[a].y != points[b].y) return points[a].y < points[b].y;
+        return a < b;
+    });
+    for (std::size_t i = 1; i < sorted.size(); ++i) {
+        const Vector2d& previous = points[sorted[i - 1]];
+        const Vector2d& current = points[sorted[i]];
+        if (previous.x == current.x && previous.y == current.y) {
+            failureReason = "input contains coincident points";
+            return false;
+        }
+    }
+
+    std::vector<std::size_t> lower, upper;
+    lower.reserve(sorted.size());
+    upper.reserve(sorted.size());
+    for (std::size_t index : sorted) {
+        while (lower.size() >= 2 &&
+            Orient(points[lower[lower.size() - 2]], points[lower.back()], points[index]) <= 0.0)
+            lower.pop_back();
+        lower.push_back(index);
+    }
+    for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
+        const std::size_t index = *it;
+        while (upper.size() >= 2 &&
+            Orient(points[upper[upper.size() - 2]], points[upper.back()], points[index]) <= 0.0)
+            upper.pop_back();
+        upper.push_back(index);
+    }
+    lower.pop_back();
+    upper.pop_back();
+    lower.insert(lower.end(), upper.begin(), upper.end());
+    if (lower.size() < 3) {
+        failureReason = "all input points are collinear";
+        return false;
+    }
+
+    hull.reserve(points.size());
+    for (std::size_t edgeIndex = 0; edgeIndex < lower.size(); ++edgeIndex) {
+        const std::size_t first = lower[edgeIndex];
+        const std::size_t second = lower[(edgeIndex + 1) % lower.size()];
+        hull.push_back(first);
+
+        std::vector<std::size_t> edgePoints;
+        for (std::size_t candidate = 0; candidate < points.size(); ++candidate) {
+            if (candidate != first && candidate != second &&
+                OnSegment(points[first], points[second], points[candidate]))
+                edgePoints.push_back(candidate);
+        }
+        const Vector2d direction = points[second] - points[first];
+        const bool sortByX = std::abs(direction.x) >= std::abs(direction.y);
+        const bool ascending = sortByX ? direction.x > 0.0 : direction.y > 0.0;
+        std::sort(edgePoints.begin(), edgePoints.end(), [&](std::size_t a, std::size_t b) {
+            const double coordinateA = sortByX ? points[a].x : points[a].y;
+            const double coordinateB = sortByX ? points[b].x : points[b].y;
+            return ascending ? coordinateA < coordinateB : coordinateA > coordinateB;
+        });
+        hull.insert(hull.end(), edgePoints.begin(), edgePoints.end());
+    }
+    return true;
+}
+
+bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
+    const std::set<Edge>& fixedConstraintEdges);
+
+// Add interior points one at a time, replacing triangles whose circles contain each point.
+// The real convex hull remains the mesh boundary throughout cavity removal.
 std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vector<Vector2d>& points,
     std::string& diagnosticTrace) {
     std::ostringstream trace;
     trace << std::setprecision(17);
-    // Add a temporary enclosing triangle so every input point begins inside the triangulation.
     points = input;
     trace << "Bowyer-Watson input points (index: x,y), count=" << points.size() << ":\n";
     for (std::size_t pointIndex = 0; pointIndex < points.size(); ++pointIndex)
         trace << "  p" << pointIndex << "=(" << points[pointIndex].x << "," << points[pointIndex].y << ")\n";
+    if (points.size() < 3) {
+        trace << "RETURN: fewer than three input points\n";
+        diagnosticTrace = trace.str();
+        return {};
+    }
     double minimumX = points[0].x, maximumX = minimumX, minimumY = points[0].y, maximumY = minimumY;
     for (const Vector2d& p : points) {
         minimumX = std::min(minimumX, p.x); maximumX = std::max(maximumX, p.x);
@@ -543,19 +625,8 @@ std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vect
         diagnosticTrace = trace.str();
         return {};
     }
-    const double centerX = (minimumX + maximumX) * 0.5, centerY = (minimumY + maximumY) * 0.5;
     const std::size_t n = points.size();
-    points.emplace_back(centerX - 32.0 * boundingBoxSpan, centerY - 16.0 * boundingBoxSpan);
-    points.emplace_back(centerX + 32.0 * boundingBoxSpan, centerY - 16.0 * boundingBoxSpan);
-    points.emplace_back(centerX, centerY + 32.0 * boundingBoxSpan);
-    trace << "supertriangle: " << n << "=(" << points[n].x << "," << points[n].y << "), "
-        << n + 1 << "=(" << points[n + 1].x << "," << points[n + 1].y << "), "
-        << n + 2 << "=(" << points[n + 2].x << "," << points[n + 2].y << ")\n";
     TriangleMesh triangleMesh;
-    const Triangle supertriangle = Ccw({n, n + 1, n + 2}, points);
-    const bool supertriangleAdded = AddTriangle(triangleMesh, supertriangle);
-    trace << "initial supertriangle face " << supertriangle[0] << "," << supertriangle[1] << "," <<
-        supertriangle[2] << " added=" << (supertriangleAdded ? "true" : "false") << "\n";
 
     auto writeTriangle = [&](std::size_t triangleIndex, const Triangle& triangle) {
         trace << "t" << triangleIndex << "=[";
@@ -587,11 +658,53 @@ std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vect
             trace << "\n";
         }
     };
-    writeLiveMesh("mesh before input insertions");
+
+    std::vector<std::size_t> hull;
+    std::string hullFailureReason;
+    if (!BuildConvexHullBoundary(points, hull, hullFailureReason)) {
+        trace << "RETURN: could not build real convex hull: " << hullFailureReason << "\n";
+        diagnosticTrace = trace.str();
+        return {};
+    }
+    trace << "real convex hull boundary (counterclockwise, index: x,y), count=" << hull.size() << ":\n";
+    for (std::size_t vertex : hull)
+        trace << "  p" << vertex << "=(" << points[vertex].x << "," << points[vertex].y << ")\n";
+
+    std::vector<Triangle> hullTriangles;
+    std::string hullTriangulationFailure;
+    if (!TriangulateSimplePolygon(hull, points, hullTriangles, hullTriangulationFailure)) {
+        trace << "RETURN: could not triangulate real convex hull: " << hullTriangulationFailure << "\n";
+        diagnosticTrace = trace.str();
+        return {};
+    }
+    trace << "real hull seed triangles (count=" << hullTriangles.size() << "):\n";
+    for (std::size_t triangleIndex = 0; triangleIndex < hullTriangles.size(); ++triangleIndex) {
+        trace << "  ";
+        writeTriangle(triangleIndex, hullTriangles[triangleIndex]);
+        trace << "\n";
+        if (!AddTriangle(triangleMesh, hullTriangles[triangleIndex])) {
+            trace << "RETURN: hull seed faces could not form valid adjacency\n";
+            diagnosticTrace = trace.str();
+            return {};
+        }
+    }
+    const std::set<Edge> noFixedConstraints;
+    if (!Legalize(triangleMesh, points, noFixedConstraints)) {
+        trace << "RETURN: real hull seed legalization did not converge\n";
+        diagnosticTrace = trace.str();
+        return {};
+    }
+    std::vector<bool> isHullVertex(n, false);
+    for (std::size_t vertex : hull) isHullVertex[vertex] = true;
+    writeLiveMesh("mesh after real hull seed legalization and before interior insertions");
 
     // Point insertion: remove triangles whose circumcircles contain the point, then fill the cavity
     // from edges that occur only once on the removed triangles' boundary.
     for (std::size_t pointIndex = 0; pointIndex < n; ++pointIndex) {
+        if (isHullVertex[pointIndex]) {
+            trace << "\nSKIP p" << pointIndex << " because it is already in the real hull seed\n";
+            continue;
+        }
         trace << "\nINSERT p" << pointIndex << "=(" << points[pointIndex].x << "," << points[pointIndex].y
             << ") stored_triangle_slots=" << triangleMesh.triangles.size() << "\n";
         std::vector<bool> trianglesToRemove(triangleMesh.triangles.size(), false);
@@ -648,21 +761,16 @@ std::vector<Triangle> BowyerWatson(const std::vector<Vector2d>& input, std::vect
             break;
         }
     }
-    // Remove faces that use temporary vertices before returning the completed triangulation.
     std::vector<Triangle> triangles;
-    trace << "\nmesh before removing supertriangle faces:\n";
+    trace << "\nreal mesh after all input insertions:\n";
     for (std::size_t triangleIndex = 0; triangleIndex < triangleMesh.triangles.size(); ++triangleIndex) {
         const StoredTriangle& triangle = triangleMesh.triangles[triangleIndex];
         if (!triangle.isPresent) continue;
         trace << "  ";
         writeTriangle(triangleIndex, triangle.vertexIndices);
         trace << "\n";
-        if (triangle.vertexIndices[0] < n && triangle.vertexIndices[1] < n && triangle.vertexIndices[2] < n)
-            triangles.push_back(triangle.vertexIndices);
-        else
-            trace << "    discarded because it uses a supertriangle vertex\n";
+        triangles.push_back(triangle.vertexIndices);
     }
-    points.resize(n);
     trace << "\nraw triangles returned by Bowyer-Watson (count=" << triangles.size() << "):\n";
     for (std::size_t triangleIndex = 0; triangleIndex < triangles.size(); ++triangleIndex) {
         trace << "  ";
