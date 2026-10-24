@@ -15,18 +15,8 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
     ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(360.0f, 680.0f), ImGuiCond_FirstUseEver);
 
-    if (ImGui::Begin("Canvas & Points Controls")) {
-        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Camera & World Space");
-        ImGui::Separator();
-        ImGui::Text("Zoom: %.2fx", camera.zoom);
-        ImGui::Text("Camera Target: (%.1f, %.1f)", camera.target.x, camera.target.y);
-        ImGui::Text("Cursor (World): (%.1f, %.1f)", mouse_world.x, mouse_world.y);
-        ImGui::Text("Cursor (Screen): (%.0f, %.0f)", mouse_screen.x, mouse_screen.y);
-        requests.reset_view = ImGui::Button("Reset View (Origin)", ImVec2(-1.0f, 24.0f));
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Geometry Editor");
+    if (ImGui::Begin("Geometry & Navmesh Controls")) {
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Geometry & Editing");
         ImGui::Separator();
         ImGui::Text("Total Points: %zu", model.VertexCount());
         ImGui::Text("Edges: %zu   Closed loops: %zu", model.Edges().size(), model.Loops().size());
@@ -38,9 +28,6 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
             ImGui::TextDisabled("Hover over a point to inspect");
         }
 
-        ImGui::Separator();
-        ImGui::Checkbox("Show Point IDs", &options.show_vertex_ids);
-        ImGui::Checkbox("Show Coordinates", &options.show_coordinates);
         ImGui::Separator();
         if (ImGui::RadioButton("Edit", editor.active_tool == EditorTool::Edit))
             requests.selected_tool = EditorTool::Edit;
@@ -72,7 +59,7 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
         }
         requests.clear_geometry = ImGui::Button("Clear Geometry", ImVec2(-1.0f, 24.0f));
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Navmesh");
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Navmesh Setup & Bake");
         double edited_radius = agent_radius;
         if (ImGui::InputDouble("Agent radius (world units)", &edited_radius, 0.1, 1.0, "%.2f")) {
             agent_radius = std::isfinite(edited_radius) ? std::max(0.0, edited_radius) : 0.0;
@@ -81,6 +68,7 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
         ImGui::Checkbox("Auto-bake on triangulation input changes", &auto_bake_navmesh);
         requests.bake_navmesh = ImGui::Button("Bake Navmesh", ImVec2(-1.0f, 24.0f));
         requests.delete_navmesh = ImGui::Button("Delete Navmesh", ImVec2(-1.0f, 24.0f));
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Bake Status");
         ImGui::Text("Stored mesh: %s", has_baked_mesh ? "yes" : "no");
         if (bake_running) ImGui::Text("Bake: running / queued");
         if (mesh_out_of_date) ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Mesh is out of date");
@@ -90,6 +78,16 @@ ControlRequests ControlPanel::Draw(const Camera2D& camera, Vector2 mouse_screen,
             case GenerationStatus::NoActiveBorder: ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.32f, 1.0f), "Last bake: no active border"); break;
             case GenerationStatus::Failed: ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Last bake: failed"); break;
         }
+
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "View & Display");
+        ImGui::Text("Zoom: %.2fx", camera.zoom);
+        ImGui::Text("Camera Target: (%.1f, %.1f)", camera.target.x, camera.target.y);
+        ImGui::Text("Cursor (World): (%.1f, %.1f)", mouse_world.x, mouse_world.y);
+        ImGui::Text("Cursor (Screen): (%.0f, %.0f)", mouse_screen.x, mouse_screen.y);
+        requests.reset_view = ImGui::Button("Reset View (Origin)", ImVec2(-1.0f, 24.0f));
+        ImGui::Checkbox("Show Coordinates", &options.show_coordinates);
+        ImGui::SliderFloat("Navmesh line transparency", &options.navmesh_edge_transparency, 0.0f, 100.0f, "%.0f%%");
     }
     ImGui::End();
 

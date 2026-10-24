@@ -9,15 +9,15 @@
 namespace cdt {
 
 struct RenderOptions {
-    bool show_vertex_ids{false};
     bool show_coordinates{false};
+    float navmesh_edge_transparency{80.0f};
 };
 
 class SceneRenderer {
 public:
     /// Draw the editable model with validation diagnostics and an optional immutable baked mesh.
     void DrawWorld(const GeometryModel& model, const GeometryValidationReport& validation, const EditorState& editor,
-        const NavMesh* mesh) const;
+        const RenderOptions& options, const NavMesh* mesh) const;
     /// Draw screen-space labels and editor status overlays.
     void DrawOverlays(const GeometryModel& model, const RenderOptions& options,
         const Camera2D& camera, const EditorState& editor) const;

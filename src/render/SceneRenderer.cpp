@@ -4,7 +4,6 @@
 #include "raymath.h"
 
 #include <cstdio>
-#include <string>
 #include <unordered_set>
 
 namespace cdt {
@@ -16,17 +15,15 @@ constexpr Color point_outer_color{15, 18, 24, 255};
 constexpr Color point_inner_color{80, 200, 240, 255};
 constexpr Color point_hover_color{255, 235, 80, 255};
 constexpr Color point_drag_color{255, 120, 90, 255};
-constexpr Color border_edge_color{255, 190, 70, 255};
-constexpr Color obstacle_edge_color{220, 100, 180, 255};
+constexpr Color border_edge_color{75, 205, 160, 255};
+constexpr Color obstacle_edge_color{255, 155, 75, 255};
 constexpr Color inactive_border_color{125, 135, 150, 255};
-constexpr Color inactive_obstacle_color{245, 80, 85, 255};
+constexpr Color inactive_obstacle_color{125, 135, 150, 255};
 constexpr Color invalid_loop_color{245, 80, 85, 255};
 constexpr Color edge_preview_color{220, 235, 245, 170};
 constexpr Color chain_move_color{90, 235, 185, 230};
-constexpr Color traversable_fill{35, 125, 225, 150};
-constexpr Color obstacle_fill{230, 55, 135, 175};
 constexpr Color traversable_mesh_edge{100, 195, 255, 235};
-constexpr Color obstacle_mesh_edge{255, 135, 195, 245};
+constexpr Color obstacle_mesh_edge{255, 155, 75, 245};
 
 Vector2 ToRaylib(Vector2d position) {
     return Vector2{static_cast<float>(position.x), static_cast<float>(position.y)};
@@ -35,18 +32,15 @@ Vector2 ToRaylib(Vector2d position) {
 } // namespace
 
 void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidationReport& validation,
-    const EditorState& editor, const NavMesh* mesh) const {
+    const EditorState& editor, const RenderOptions& options, const NavMesh* mesh) const {
     // Diagnostics are indexed in model-loop order by GeometryValidationReport.
     if (mesh) for (const MeshTriangle& triangle : mesh->Triangles()) {
         const Vector2 a = ToRaylib(mesh->Vertices()[triangle.vertices[0]].position);
         const Vector2 b = ToRaylib(mesh->Vertices()[triangle.vertices[1]].position);
         const Vector2 c = ToRaylib(mesh->Vertices()[triangle.vertices[2]].position);
         const bool obstacle = triangle.region == TriangleRegion::Obstacle;
-        const Color fill = obstacle ? obstacle_fill : traversable_fill;
-        const Color edge = obstacle ? obstacle_mesh_edge : traversable_mesh_edge;
-        // The 2D canvas transform reverses winding; swap two vertices so
-        // raylib's back-face culling keeps the filled triangle visible.
-        //DrawTriangle(a, c, b, fill);
+        Color edge = obstacle ? obstacle_mesh_edge : traversable_mesh_edge;
+        edge.a = static_cast<unsigned char>(edge.a * (1.0f - options.navmesh_edge_transparency / 100.0f));
         DrawLineEx(a, b, 1.5f, edge);
         DrawLineEx(b, c, 1.5f, edge);
         DrawLineEx(c, a, 1.5f, edge);
@@ -119,22 +113,16 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidati
 
 void SceneRenderer::DrawOverlays(const GeometryModel& model, const RenderOptions& options,
     const Camera2D& camera, const EditorState& editor) const {
-    if (options.show_vertex_ids || options.show_coordinates) {
+    if (options.show_coordinates) {
         for (const Vertex& vertex : model.Vertices()) {
             const Vector2 screen = GetWorldToScreen2D(ToRaylib(vertex.position), camera);
             if (screen.x < -100.0f || screen.x > static_cast<float>(GetScreenWidth()) + 100.0f ||
                 screen.y < -50.0f || screen.y > static_cast<float>(GetScreenHeight()) + 50.0f) continue;
 
-            if (options.show_vertex_ids) {
-                const std::string label = "P" + std::to_string(vertex.id);
-                DrawText(label.c_str(), static_cast<int>(screen.x) + 10, static_cast<int>(screen.y) - 12, 16, RAYWHITE);
-            }
-            if (options.show_coordinates) {
-                char buffer[64];
-                std::snprintf(buffer, sizeof(buffer), "(%.1f, %.1f)", vertex.position.x, vertex.position.y);
-                DrawText(buffer, static_cast<int>(screen.x) + 10, static_cast<int>(screen.y) + 6,
-                    12, Color{170, 185, 200, 210});
-            }
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer), "(%.1f, %.1f)", vertex.position.x, vertex.position.y);
+            DrawText(buffer, static_cast<int>(screen.x) + 10, static_cast<int>(screen.y) + 6,
+                12, Color{170, 185, 200, 210});
         }
     }
 

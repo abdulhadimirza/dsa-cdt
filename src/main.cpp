@@ -76,7 +76,7 @@ int main() {
         BeginMode2D(camera.GetCamera());
         camera.DrawWorldGrid();
         renderer.DrawWorld(geometry, validation, editor.State(),
-            bake_session.baked_mesh.has_value() ? &*bake_session.baked_mesh : nullptr);
+            control_panel.Options(), bake_session.baked_mesh.has_value() ? &*bake_session.baked_mesh : nullptr);
         EndMode2D();
 
         renderer.DrawOverlays(geometry, control_panel.Options(), camera.GetCamera(), editor.State());
