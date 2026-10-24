@@ -25,20 +25,28 @@ NavMesh::NavMesh(ConstrainedMesh&& draft)
 
 namespace detail {
 
+/// Canonically ordered vertex indices for one undirected mesh edge.
 using Edge = std::array<std::size_t, 2>;
+/// Three vertex indices forming one triangle; stored faces are kept counterclockwise.
 using Triangle = std::array<std::size_t, 3>;
+/// Stable position of a face in TriangleMesh::triangles, including after that face is removed.
 using TriangleIndex = std::size_t;
 
+/// A triangle kept in indexed storage so removing it does not renumber its surviving neighbors.
 struct StoredTriangle {
     Triangle vertexIndices{};
     std::array<std::optional<TriangleIndex>, 3> neighborTriangleIndices{};
     bool isPresent{true};
 };
+/// One triangle's use of an edge, including which opposite-vertex slot refers to that edge.
 struct TriangleOnEdge { TriangleIndex triangleIndex{}; std::size_t oppositeVertexSlot{}; };
+/// The zero, one, or two triangles currently using a mesh edge.
 struct TrianglesOnEdge { std::array<TriangleOnEdge, 2> triangles{}; std::size_t triangleCount{}; };
+/// Mutable triangle storage and edge lookup used while constructing or editing a triangulation.
 struct TriangleMesh {
     std::vector<StoredTriangle> triangles;
     std::map<Edge, TrianglesOnEdge> trianglesByEdge;
+    /// Once false, a topology update has violated the manifold edge-use invariant.
     bool hasValidTopology{true};
 };
 
@@ -405,46 +413,80 @@ bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Ve
 
 /// Describe the replacement triangles for a flip without mutating the mesh.
 /// @return True when the shared edge forms a convex quadrilateral with a valid replacement diagonal.
+/// Inspect an edge flip and prepare its replacement faces without changing the mesh.
+/// @param triangleMesh Current mesh whose edge table and triangle storage describe the candidate.
+/// @param edge Shared diagonal to inspect; its endpoints become the old diagonal of the quadrilateral.
+/// @param points Coordinates for every vertex index used by the mesh.
+/// @param first Receives one counterclockwise replacement triangle on success.
+/// @param second Receives the other counterclockwise replacement triangle on success.
+/// @param replacementEdge Receives the canonical edge connecting the two opposite vertices on success.
+/// @return True when the old diagonal can be replaced by a distinct, existing-edge-free diagonal
+///         and both replacement triangles have nonzero area. Output values are only valid on success.
+/// @note A shared edge must have two incident triangles, and its endpoints and opposite vertices
+///       must form a convex quadrilateral for the diagonal swap to preserve a valid local mesh.
 bool GetFlippedTriangles(const TriangleMesh& triangleMesh, const Edge& edge,
     const std::vector<Vector2d>& points, Triangle& first, Triangle& second, Edge& replacementEdge) {
+    // A boundary edge has only one incident face, so there is no pair of triangles to retriangulate.
     const auto edgeIterator = triangleMesh.trianglesByEdge.find(edge);
     if (edgeIterator == triangleMesh.trianglesByEdge.end() || edgeIterator->second.triangleCount != 2) return false;
+
+    // Each edge use records the triangle and the slot opposite this shared edge; those slots reveal C and D.
     const auto adjacentTriangles = edgeIterator->second.triangles;
     const TriangleIndex firstTriangleIndex = adjacentTriangles[0].triangleIndex;
     const TriangleIndex secondTriangleIndex = adjacentTriangles[1].triangleIndex;
     const std::size_t c = triangleMesh.triangles[firstTriangleIndex].vertexIndices[adjacentTriangles[0].oppositeVertexSlot];
     const std::size_t d = triangleMesh.triangles[secondTriangleIndex].vertexIndices[adjacentTriangles[1].oppositeVertexSlot];
     const std::size_t a = edge[0], b = edge[1];
+
+    // The old and proposed diagonals must cross inside the quadrilateral; otherwise this is not a safe flip.
     if (c == d || !ProperlyIntersects(points[a], points[b], points[c], points[d])) return false;
 
+    // Store the replacement diagonal consistently and reject it if the mesh already contains that edge.
     replacementEdge = MakeEdge(c, d);
     if (triangleMesh.trianglesByEdge.contains(replacementEdge)) return false;
+
+    // The new diagonal creates one triangle with A and one with B; normalize both windings before use.
     first = Ccw({c, d, a}, points);
     second = Ccw({d, c, b}, points);
+
+    // Reject flat faces now, before a caller removes the two existing triangles.
     return Orient(points[first[0]], points[first[1]], points[first[2]]) != 0.0 &&
         Orient(points[second[0]], points[second[1]], points[second[2]]) != 0.0;
 }
 
-/// Try to recover one constraint segment by flipping crossing edges, then use cavity recovery if needed.
+/// Recover one constraint segment by reducing its crossings with edge flips, then use cavity recovery if needed.
 /// @param constraint Endpoint indices of the single segment to insert.
 /// @param triangleMesh Mesh that may be changed by successful flips or cavity filling.
 /// @param points Coordinates for all vertex indices.
 /// @param fixedConstraintEdges Edges that must not be flipped or removed.
 /// @return True when the segment exists and has been added to the protected-edge set.
-/// @note The bounded flip loop prevents recovery from running forever; cavity recovery is the fallback.
+/// @note Progress-making flips are preferred. Eight consecutive successful flips that leave the
+///       crossing count unchanged trigger one early cavity attempt; the original iteration cap and
+///       its final cavity attempt remain as safety fallbacks.
 bool RecoverConstraintSingle(const Edge& constraint, TriangleMesh& triangleMesh,
     const std::vector<Vector2d>& points, std::set<Edge>& fixedConstraintEdges) {
+    // Bound total work even if neither flips nor the cavity can recover this segment.
     const std::size_t iterationLimit = triangleMesh.trianglesByEdge.size() * triangleMesh.trianglesByEdge.size() + 32;
     constexpr std::size_t maximumNonProgressFlipStreak = 8;
+
+    // Neutral flips may expose a useful flip on the next pass; count consecutive neutral flips
+    // and give cavity recovery one early opportunity before the much larger iteration cap.
     std::size_t nonProgressFlipStreak = 0;
     bool earlyCavityAttempted = false;
     for (std::size_t iteration = 0; iteration < iterationLimit; ++iteration) {
+        // The target may have appeared as a side effect of an earlier flip; protect it and finish.
         if (HasEdge(triangleMesh, constraint)) { fixedConstraintEdges.insert(constraint); return true; }
+
+        // Gather every current edge that crosses the target segment. Only these edges can be
+        // candidates for a recovery flip in this iteration.
         std::vector<Edge> crossingEdges;
         for (const auto& [edge, trianglesOnEdge] : triangleMesh.trianglesByEdge) {
             (void)trianglesOnEdge;
             if (edge != constraint && ProperlyIntersects(points[constraint[0]], points[constraint[1]], points[edge[0]], points[edge[1]])) crossingEdges.push_back(edge);
         }
+
+        // Inspect all flippable crossings before changing the mesh so a later progress-making
+        // candidate is not passed over in favor of an earlier neutral candidate in map order.
         bool flipped = false;
         bool madeProgress = false;
         std::vector<Edge> progressCandidates;
@@ -458,6 +500,7 @@ bool RecoverConstraintSingle(const Edge& constraint, TriangleMesh& triangleMesh,
                 points[replacementEdge[0]], points[replacementEdge[1]]);
             (replacementStillCrosses ? nonProgressCandidates : progressCandidates).push_back(edge);
         }
+
         // Prefer a flip that removes a crossing. If none exists, try neutral flips so
         // they can expose a progressing flip, but bound how long that sequence can run.
         const auto tryFlips = [&](const std::vector<Edge>& candidates, bool candidateMakesProgress) {
@@ -469,39 +512,56 @@ bool RecoverConstraintSingle(const Edge& constraint, TriangleMesh& triangleMesh,
         };
         tryFlips(progressCandidates, true);
         if (!flipped) tryFlips(nonProgressCandidates, false);
+
+        // If no crossing edge can be flipped, immediately try replacing the whole crossed strip.
         if (!flipped) {
             if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges))
                 return (fixedConstraintEdges.insert(constraint), true);
             return false;
         }
+
+        // Removing a crossing resets the streak. A neutral flip increments it because the target
+        // still crosses the same number of edges after that diagonal replacement.
         if (madeProgress) nonProgressFlipStreak = 0;
         else ++nonProgressFlipStreak;
 
+        // Try the local cavity rebuild once after eight consecutive neutral flips. A failed cavity
+        // attempt leaves the mesh intact, so the bounded flip loop can continue safely.
         if (!earlyCavityAttempted && nonProgressFlipStreak >= maximumNonProgressFlipStreak) {
             earlyCavityAttempted = true;
             if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges))
                 return (fixedConstraintEdges.insert(constraint), true);
         }
     }
+
+    // The flip budget was exhausted; make the original last-resort cavity attempt before failing.
     if (RecoverByCavity(constraint, triangleMesh, points, fixedConstraintEdges))
         return (fixedConstraintEdges.insert(constraint), true);
     return false;
 }
 
-/// Replace the shared diagonal of two adjacent triangles with the other diagonal of their four-corner shape.
+/// Replace a shared diagonal with the other diagonal of its adjacent quadrilateral.
 /// @param triangleMesh Mesh containing the two triangles.
 /// @param edge Shared edge to replace.
 /// @param points Coordinates for all vertex indices.
 /// @return True if the replacement was valid and added; false if the edge cannot be flipped safely.
+/// @note The replacement faces are prepared and validated before either original face is removed.
 bool FlipEdge(TriangleMesh& triangleMesh, const Edge& edge, const std::vector<Vector2d>& points) {
     Triangle first{}, second{};
     Edge replacementEdge{};
+
+    // Recheck the live mesh immediately before mutation. This keeps FlipEdge safe for both
+    // constraint recovery and legalization callers, even if they did not pre-inspect the edge.
     if (!GetFlippedTriangles(triangleMesh, edge, points, first, second, replacementEdge)) return false;
-    // Remove the old pair, then register the replacement pair and all local links.
+
+    // Save both face indices while the old adjacency records still exist.
     const auto edgeIterator = triangleMesh.trianglesByEdge.find(edge);
     const auto adjacentTriangles = edgeIterator->second.triangles;
     const TriangleIndex firstTriangleIndex = adjacentTriangles[0].triangleIndex;
     const TriangleIndex secondTriangleIndex = adjacentTriangles[1].triangleIndex;
+
+    // Remove the old pair, then register the replacement pair; AddTriangle updates edge uses
+    // and reciprocal neighbor links as each new face is inserted.
     RemoveTriangle(triangleMesh, firstTriangleIndex); RemoveTriangle(triangleMesh, secondTriangleIndex);
     if (!AddTriangle(triangleMesh, first) || !AddTriangle(triangleMesh, second)) { triangleMesh.hasValidTopology = false; return false; }
     return true;
