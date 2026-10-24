@@ -44,16 +44,17 @@ std::optional<std::size_t> FindContainingTriangle(const NavMesh& mesh, Vector2d 
 
 /// Finds a minimum-cost traversable triangle corridor with A*; returns empty when disconnected.
 std::optional<std::vector<std::size_t>> FindCorridor(
-    const NavMesh& mesh, std::size_t start, std::size_t goal, Vector2d destination) {
+    const NavMesh& mesh, std::size_t start, std::size_t goal) {
     const std::size_t count = mesh.Triangles().size();
     const double infinity = std::numeric_limits<double>::infinity();
     std::vector<double> costs(count, infinity);
     std::vector<std::size_t> previous(count, count);
     using Entry = std::tuple<double, double, std::size_t>;
     std::priority_queue<Entry, std::vector<Entry>, std::greater<>> pending;
+    const Vector2d goalCenter = Centroid(mesh, mesh.Triangles()[goal]);
     costs[start] = 0.0;
-    pending.emplace(Centroid(mesh, mesh.Triangles()[start]).distance(destination), 0.0, start);
-    // Costs are centroid-to-centroid distances; the straight-line distance to the goal is admissible.
+    pending.emplace(Centroid(mesh, mesh.Triangles()[start]).distance(goalCenter), 0.0, start);
+    // Costs are centroid-to-centroid distances, so distance to the goal centroid is admissible.
     while (!pending.empty()) {
         const auto [estimate, cost, current] = pending.top();
         pending.pop();
@@ -68,7 +69,7 @@ std::optional<std::vector<std::size_t>> FindCorridor(
             if (candidate < costs[*neighbor]) {
                 costs[*neighbor] = candidate;
                 previous[*neighbor] = current;
-                pending.emplace(candidate + center.distance(destination), candidate, *neighbor);
+                pending.emplace(candidate + center.distance(goalCenter), candidate, *neighbor);
             }
         }
     }
@@ -142,7 +143,7 @@ PathResult FindPath(const NavMesh& mesh, Vector2d start, Vector2d goal) {
     if (!startTriangle) { result.status = PathStatus::StartOutsideMesh; return result; }
     const auto goalTriangle = FindContainingTriangle(mesh, goal);
     if (!goalTriangle) { result.status = PathStatus::GoalOutsideMesh; return result; }
-    auto corridor = FindCorridor(mesh, *startTriangle, *goalTriangle, goal);
+    auto corridor = FindCorridor(mesh, *startTriangle, *goalTriangle);
     if (!corridor) { result.status = PathStatus::NoPath; return result; }
     result.triangleCorridor = std::move(*corridor);
     result.waypoints = SmoothPath(BuildPortals(mesh, result.triangleCorridor, start, goal), start, goal);
