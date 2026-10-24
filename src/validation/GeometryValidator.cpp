@@ -1,4 +1,5 @@
 #include "validation/GeometryValidator.hpp"
+#include "core/GeometryPredicates.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -42,7 +43,7 @@ double LoopScale(const GeometryModel& model, const GeometryLoop& loop) {
 
 // Compute the signed 2D cross product of vectors AB and AC.
 double Cross(Vector2d a, Vector2d b, Vector2d c) {
-    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    return geometry::Cross2D(b - a, c - a);
 }
 
 // --- Segment and loop geometry predicates ---
@@ -90,16 +91,19 @@ bool IsIndividuallyValid(const GeometryModel& model, const GeometryLoop& loop, c
     if (loop.vertices.size() < 3) return false;
     const Vertex* origin_vertex = model.FindVertex(loop.vertices.front());
     if (!origin_vertex) return false;
-    const Vector2d origin = origin_vertex->position;
-    double twice_area = 0.0;
+    std::vector<Vector2d> polygon;
+    polygon.reserve(loop.vertices.size());
     for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
         const Vertex* a = model.FindVertex(loop.vertices[i]);
         const Vertex* b = model.FindVertex(loop.vertices[(i + 1) % loop.vertices.size()]);
         if (!a || !b) return false;
+        if (!std::isfinite(a->position.x) || !std::isfinite(a->position.y) ||
+            !std::isfinite(b->position.x) || !std::isfinite(b->position.y)) return false;
         if (std::hypot(b->position.x - a->position.x, b->position.y - a->position.y) <= tolerance.length)
             return false;
-        twice_area += Cross(origin, a->position, b->position);
+        polygon.push_back(a->position);
     }
+    const double twice_area = geometry::SignedTwiceArea(polygon);
     if (std::abs(twice_area) <= tolerance.area) return false;
 
     for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
@@ -136,21 +140,17 @@ bool IsIndividuallyValid(const GeometryModel& model, const GeometryLoop& loop, c
 // Use ray casting to test strict polygon containment; points on the boundary are outside.
 bool ContainsPoint(const GeometryModel& model, const GeometryLoop& polygon, Vector2d point,
     const Tolerance& tolerance) {
-    bool inside = false;
+    std::vector<Vector2d> points;
+    points.reserve(polygon.vertices.size());
     for (std::size_t i = 0, j = polygon.vertices.size() - 1; i < polygon.vertices.size(); j = i++) {
         const Vertex* a = model.FindVertex(polygon.vertices[i]);
         const Vertex* b = model.FindVertex(polygon.vertices[j]);
         if (!a || !b) return false;
         // Boundary contact is deliberately not containment; callers require strict interior points.
         if (OnSegment(a->position, b->position, point, tolerance)) return false;
-        const bool spans = (a->position.y > point.y) != (b->position.y > point.y);
-        if (spans) {
-            const double x = (b->position.x - a->position.x) * (point.y - a->position.y) /
-                (b->position.y - a->position.y) + a->position.x;
-            if (point.x < x) inside = !inside;
-        }
+        points.push_back(a->position);
     }
-    return inside;
+    return geometry::PointInPolygon(points, point, geometry::BoundaryPolicy::Outside);
 }
 
 // Require both non-intersecting boundaries and every candidate vertex strictly inside the border.
@@ -166,7 +166,7 @@ bool EntirelyInside(const GeometryModel& model, const GeometryLoop& candidate, c
 // --- Individual-loop validation ---
 
 // Allocate one result per model loop and compute each loop's independent validity.
-void InitializeLoopResults(const GeometryModel& model, GeometryValidation& result) {
+void InitializeLoopResults(const GeometryModel& model, GeometryValidationReport& result) {
     result.loops.resize(model.Loops().size());
     for (std::size_t i = 0; i < model.Loops().size(); ++i) {
         result.loops[i].loop_index = i;
@@ -176,7 +176,7 @@ void InitializeLoopResults(const GeometryModel& model, GeometryValidation& resul
 }
 
 // Choose the earliest completed individually valid border and mark it active and eligible.
-void SelectActiveBorder(const GeometryModel& model, GeometryValidation& result) {
+void SelectActiveBorder(const GeometryModel& model, GeometryValidationReport& result) {
     std::vector<std::size_t> border_candidates;
     for (std::size_t i = 0; i < model.Loops().size(); ++i) {
         const GeometryLoop& loop = model.Loops()[i];
@@ -198,7 +198,7 @@ void SelectActiveBorder(const GeometryModel& model, GeometryValidation& result) 
 // --- Whole-model obstacle validation ---
 
 // Classify valid obstacles against the selected border before obstacle-pair checks.
-void ClassifyObstaclesAgainstBorder(const GeometryModel& model, GeometryValidation& result) {
+void ClassifyObstaclesAgainstBorder(const GeometryModel& model, GeometryValidationReport& result) {
     if (!result.active_border_index) return;
     const GeometryLoop& border = model.Loops()[*result.active_border_index];
 
@@ -214,7 +214,7 @@ void ClassifyObstaclesAgainstBorder(const GeometryModel& model, GeometryValidati
 }
 
 // Mark contained obstacles ineligible when they intersect the border or another contained obstacle.
-void DetectObstacleConflicts(const GeometryModel& model, GeometryValidation& result) {
+void DetectObstacleConflicts(const GeometryModel& model, GeometryValidationReport& result) {
     for (std::size_t i = 0; i < model.Loops().size(); ++i) {
         const GeometryLoop& loop = model.Loops()[i];
         if (loop.type != EdgeType::Obstacle || !result.loops[i].individually_valid ||
@@ -236,12 +236,32 @@ void DetectObstacleConflicts(const GeometryModel& model, GeometryValidation& res
 
 } // namespace
 
-GeometryValidation GeometryValidator::Validate(const GeometryModel& model) const {
-    GeometryValidation result;
+GeometryValidationReport GeometryValidator::Validate(const GeometryModel& model) const {
+    GeometryValidationReport result;
     InitializeLoopResults(model, result);
     SelectActiveBorder(model, result);
     ClassifyObstaclesAgainstBorder(model, result);
     DetectObstacleConflicts(model, result);
+    if (result.active_border_index) {
+        // Copy validated loops once: downstream geometry stages consume this snapshot without
+        // querying the editable model again. Individual validity guarantees all vertex IDs resolve.
+        const auto snapshot_loop = [&](std::size_t index) {
+            const GeometryLoop& source = model.Loops()[index];
+            ValidatedLoop loop;
+            loop.source_loop_index = index;
+            loop.vertex_ids = source.vertices;
+            loop.vertices.reserve(source.vertices.size());
+            for (VertexId id : source.vertices)
+                loop.vertices.push_back(model.FindVertex(id)->position);
+            return loop;
+        };
+        ValidatedLoop border = snapshot_loop(*result.active_border_index);
+        std::vector<ValidatedLoop> obstacles;
+        for (std::size_t i = 0; i < model.Loops().size(); ++i)
+            if (i != *result.active_border_index && result.loops[i].eligible &&
+                model.Loops()[i].type == EdgeType::Obstacle) obstacles.push_back(snapshot_loop(i));
+        result.validated_navmesh_input = ValidatedNavmeshInput(std::move(border), std::move(obstacles));
+    }
     return result;
 }
 

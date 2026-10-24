@@ -54,9 +54,17 @@ FetchContent_MakeAvailable(clipper2)
 # Define our executable target
 add_executable(${PROJECT_NAME} 
     src/main.cpp
+    # Shared robust predicates and asynchronous bake/session support.
+    src/core/GeometryPredicates.cpp
     src/app/NavmeshBakeCoordinator.cpp
+    src/app/NavmeshBakeSession.cpp
+    src/app/NavmeshInputKey.cpp
     src/cdt/ConstrainedDelaunay.cpp
-    src/cdt/WalkableRegionBuilder.cpp
+    # Walkable-region preparation and navmesh pipeline layers.
+    src/navmesh/WalkableRegionBuilder.cpp
+    src/navmesh/NavmeshPipeline.cpp
+    # Queries against the immutable generated navmesh.
+    src/pathfinding/Pathfinder.cpp
     src/app/CameraController.cpp
     src/model/GeometryModel.cpp
     src/validation/GeometryValidator.cpp

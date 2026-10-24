@@ -1,4 +1,5 @@
 #include "model/GeometryModel.hpp"
+#include "core/GeometryPredicates.hpp"
 
 #include <algorithm>
 #include <string>
@@ -44,16 +45,14 @@ bool OrderCycle(VertexId start, const Adjacency& adjacency,
     return current == start && ordered.size() == component.size();
 }
 
-// Calculates twice the signed polygon area for the ordered vertex IDs.
+// Calculates twice the signed polygon area in loop order; the shared origin-relative sum
+// reduces cancellation when coordinates are large relative to the polygon's dimensions.
 double SignedTwiceArea(const std::vector<VertexId>& ordered,
     const std::unordered_map<VertexId, Vector2d>& positions) {
-    double twice_area = 0.0;
-    for (std::size_t i = 0; i < ordered.size(); ++i) {
-        const Vector2d& a = positions.at(ordered[i]);
-        const Vector2d& b = positions.at(ordered[(i + 1) % ordered.size()]);
-        twice_area += a.x * b.y - b.x * a.y;
-    }
-    return twice_area;
+    std::vector<Vector2d> polygon;
+    polygon.reserve(ordered.size());
+    for (VertexId id : ordered) polygon.push_back(positions.at(id));
+    return geometry::SignedTwiceArea(polygon);
 }
 
 // Creates a stable key from the edge type and the unordered set of loop vertices.

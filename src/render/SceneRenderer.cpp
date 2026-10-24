@@ -34,12 +34,13 @@ Vector2 ToRaylib(Vector2d position) {
 
 } // namespace
 
-void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidation& validation,
-    const EditorState& editor, const ConstrainedMesh* mesh) const {
-    if (mesh) for (const MeshTriangle& triangle : mesh->triangles) {
-        const Vector2 a = ToRaylib(mesh->vertices[triangle.vertices[0]].position);
-        const Vector2 b = ToRaylib(mesh->vertices[triangle.vertices[1]].position);
-        const Vector2 c = ToRaylib(mesh->vertices[triangle.vertices[2]].position);
+void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidationReport& validation,
+    const EditorState& editor, const NavMesh* mesh) const {
+    // Diagnostics are indexed in model-loop order by GeometryValidationReport.
+    if (mesh) for (const MeshTriangle& triangle : mesh->Triangles()) {
+        const Vector2 a = ToRaylib(mesh->Vertices()[triangle.vertices[0]].position);
+        const Vector2 b = ToRaylib(mesh->Vertices()[triangle.vertices[1]].position);
+        const Vector2 c = ToRaylib(mesh->Vertices()[triangle.vertices[2]].position);
         const bool obstacle = triangle.region == TriangleRegion::Obstacle;
         const Color fill = obstacle ? obstacle_fill : traversable_fill;
         const Color edge = obstacle ? obstacle_mesh_edge : traversable_mesh_edge;
@@ -73,6 +74,7 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidati
     for (std::size_t loop_index = 0; loop_index < model.Loops().size(); ++loop_index) {
         const GeometryLoop& loop = model.Loops()[loop_index];
         const LoopValidation* state = loop_index < validation.loops.size() ? &validation.loops[loop_index] : nullptr;
+        // Invalid, inactive, and conflicting loops remain visible with distinct diagnostic colors.
         Color color = invalid_loop_color;
         if (state && state->individually_valid) {
             if (loop.type == EdgeType::Border) color = state && state->active_border

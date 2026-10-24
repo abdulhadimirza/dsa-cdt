@@ -1,5 +1,5 @@
 #include "cdt/ConstrainedDelaunay.hpp"
-#include "cdt/WalkableRegionBuilder.hpp"
+#include "core/GeometryPredicates.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -12,9 +12,13 @@
 #include <optional>
 #include <set>
 
-#include "robust-predicates/geompred.hpp"
 
 namespace cdt {
+
+NavMesh::NavMesh(ConstrainedMesh&& draft)
+    : vertices_(std::move(draft.vertices)), triangles_(std::move(draft.triangles)),
+      constraints_(std::move(draft.constraints)) {}
+
 namespace detail {
 
 using Edge = std::array<std::size_t, 2>;
@@ -136,57 +140,18 @@ bool BuildFinalAdjacency(ConstrainedMesh& mesh) {
     return true;
 }
 
-// Return the average of a triangle's three vertex positions.
-Vector2d Centroid(const ConstrainedMesh& mesh, const MeshTriangle& triangle) {
-    const Vector2d firstPosition = mesh.vertices[triangle.vertices[0]].position;
-    const Vector2d secondPosition = mesh.vertices[triangle.vertices[1]].position;
-    const Vector2d thirdPosition = mesh.vertices[triangle.vertices[2]].position;
-    return (firstPosition + secondPosition + thirdPosition) / 3.0;
-}
-
-// Return the signed 2D cross product of two vectors from a shared origin.
-double Cross(Vector2d firstVector, Vector2d secondVector) {
-    return firstVector.x * secondVector.y - firstVector.y * secondVector.x;
-}
-
-// Check whether a point is inside or on the boundary of a counterclockwise triangle.
-bool ContainsPoint(const ConstrainedMesh& mesh, const MeshTriangle& triangle, Vector2d point) {
-    const Vector2d first = mesh.vertices[triangle.vertices[0]].position;
-    const Vector2d second = mesh.vertices[triangle.vertices[1]].position;
-    const Vector2d third = mesh.vertices[triangle.vertices[2]].position;
-    constexpr double edgeTolerance = 1e-10;
-
-    // For counterclockwise triangles, an interior point is left of all three directed edges.
-    return Cross(second - first, point - first) >= -edgeTolerance &&
-        Cross(third - second, point - second) >= -edgeTolerance &&
-        Cross(first - third, point - third) >= -edgeTolerance;
-}
-
 // Report whether the mesh currently contains the requested undirected edge.
 bool HasEdge(const TriangleMesh& triangleMesh, const Edge& edge) { return triangleMesh.trianglesByEdge.contains(edge); }
 
-// Set up the exact geometry checks once. The predicates need this initialization before use.
-void InitializePredicates() {
-    static const bool initialized = [] { mp_float::exactinit(); return true; }();
-    (void)initialized;
-}
-
 // Return the signed side of C relative to AB. Other functions use the sign to test turns and crossings.
 double Orient(const Vector2d& firstPoint, const Vector2d& secondPoint, const Vector2d& thirdPoint) {
-    InitializePredicates();
-    const double firstCoordinates[]{firstPoint.x, firstPoint.y}, secondCoordinates[]{secondPoint.x, secondPoint.y}, thirdCoordinates[]{thirdPoint.x, thirdPoint.y};
-    return geompred::orient2d(firstCoordinates, secondCoordinates, thirdCoordinates);
+    return geometry::Orient2D(firstPoint, secondPoint, thirdPoint);
 }
 
 // Return the signed circle test for D against ABC. The triangulation uses it to choose triangles to replace.
 double InBall(const Vector2d& firstTrianglePoint, const Vector2d& secondTrianglePoint,
     const Vector2d& thirdTrianglePoint, const Vector2d& testPoint) {
-    InitializePredicates();
-    const double firstCoordinates[]{firstTrianglePoint.x, firstTrianglePoint.y};
-    const double secondCoordinates[]{secondTrianglePoint.x, secondTrianglePoint.y};
-    const double thirdCoordinates[]{thirdTrianglePoint.x, thirdTrianglePoint.y};
-    const double testCoordinates[]{testPoint.x, testPoint.y};
-    return geompred::inball2d(firstCoordinates, secondCoordinates, thirdCoordinates, testCoordinates);
+    return geometry::InCircle2D(firstTrianglePoint, secondTrianglePoint, thirdTrianglePoint, testPoint);
 }
 
 // Reverse two vertex indices when needed so later geometry checks receive a counterclockwise triangle.
@@ -205,17 +170,13 @@ struct InputGeometry {
     std::vector<ContourIndices> contours;
 };
 
-// Test contour membership with a ray so generation can keep only triangles inside the border.
+// Test contour membership with the shared ray-cast predicate; boundary points are excluded so
+// region filtering follows a consistent strict-interior policy.
 bool PointInLoop(const Vector2d& point, const ContourIndices& contour, const std::vector<Vector2d>& points) {
-    // Count horizontal-ray crossings; an odd count means the point is inside the contour.
-    bool inside = false;
-    for (std::size_t i = 0, j = contour.vertices.size() - 1; i < contour.vertices.size(); j = i++) {
-        const Vector2d& a = points[contour.vertices[i]];
-        const Vector2d& b = points[contour.vertices[j]];
-        if ((a.y > point.y) != (b.y > point.y) &&
-            point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
-    }
-    return inside;
+    std::vector<Vector2d> polygon;
+    polygon.reserve(contour.vertices.size());
+    for (std::size_t index : contour.vertices) polygon.push_back(points[index]);
+    return geometry::PointInPolygon(polygon, point, geometry::BoundaryPolicy::Outside);
 }
 
 // Compare which side each segment's endpoints lie on. Opposite sides on both segments mean they cross inside.
@@ -365,26 +326,12 @@ bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
 
 // Make one required mesh edge for each consecutive pair of vertices in each selected contour.
 // These edges keep the generated triangles aligned with the border and obstacle outlines.
-bool BuildConstraints(const InputGeometry& input, std::set<Edge>& constraints, std::string& error) {
+void BuildConstraints(const InputGeometry& input, std::set<Edge>& constraints) {
     // Record each contour edge, including the edge from its last vertex back to its first.
     for (const ContourIndices& contour : input.contours) for (std::size_t i = 0; i < contour.vertices.size(); ++i) {
         const std::size_t startVertexIndex = contour.vertices[i], endVertexIndex = contour.vertices[(i + 1) % contour.vertices.size()];
-        if (startVertexIndex == endVertexIndex) {
-            error = "Coincident constraint endpoints.";
-            return false;
-        }
         constraints.insert(MakeEdge(startVertexIndex, endVertexIndex));
     }
-    return true;
-}
-
-// Find duplicate positions belonging to different input vertices, which the triangulator cannot handle.
-bool HasCoincidentPoints(const std::vector<Vector2d>& points) {
-    // Compare each pair once because the triangulator cannot use coincident input points.
-    for (std::size_t i = 0; i < points.size(); ++i)
-        for (std::size_t j = i + 1; j < points.size(); ++j)
-            if (points[i] == points[j]) return true;
-    return false;
 }
 
 // Create the initial triangle mesh, recover all required contour edges, then legalize its free edges.
@@ -449,8 +396,8 @@ bool UsesEveryInputVertex(const ConstrainedMesh& mesh) {
     return !mesh.triangles.empty() && std::find(usedVertices.begin(), usedVertices.end(), false) == usedVertices.end();
 }
 
-// Append a component's vertices, faces, and constraints while shifting its local indices.
-void AppendComponentMesh(const InputGeometry& input, const std::set<Edge>& constraints,
+// Append one region's vertices, faces, and constraints while shifting its local indices.
+void AppendRegionMesh(const InputGeometry& input, const std::set<Edge>& constraints,
     ConstrainedMesh& combinedMesh) {
     const std::size_t baseVertexIndex = combinedMesh.vertices.size();
     combinedMesh.vertices.insert(combinedMesh.vertices.end(), input.mesh.vertices.begin(), input.mesh.vertices.end());
@@ -464,209 +411,53 @@ void AppendComponentMesh(const InputGeometry& input, const std::set<Edge>& const
 
 } // namespace
 
-// Build a mesh from the active border and eligible obstacle loops.
-// Input loops become constraints, triangles are selected by location, and failures return a message.
-GenerationResult ConstrainedDelaunay::Generate(const GeometryModel& model,
-    const GeometryValidation& validation, double agent_radius) const {
-    if (!std::isfinite(agent_radius) || agent_radius < 0.0)
-        return {GenerationStatus::Failed, {}, "Agent radius must be a finite, nonnegative world-space value."};
-    if (!validation.active_border_index)
-        return {GenerationStatus::NoActiveBorder, {}, "No valid active border."};
-
-    // Build walkable regions separately, then triangulate and merge each connected component.
-    std::vector<detail::WalkableRegion> walkableRegions;
+// Triangulate only pre-sanitized walkable regions. For each region, preserve any surviving source
+// IDs, recover its contour constraints, filter faces by outer/hole membership, and require vertex
+// coverage. Adjacency is validated on the combined draft before it can become an immutable NavMesh.
+GenerationResult ConstrainedDelaunay::Triangulate(const detail::WalkableRegionSet& regions) const {
     std::string error;
-    if (!detail::BuildWalkableRegions(model, validation, agent_radius, walkableRegions, error))
-        return {GenerationStatus::Failed, {}, error};
-
     ConstrainedMesh combined;
-    std::size_t componentCount = 0;
-    for (const detail::WalkableRegion& region : walkableRegions) {
+    std::size_t regionCount = 0;
+    for (const detail::WalkableRegion& region : regions.Regions()) {
         InputGeometry input;
-        // Add a contour to this component and retain matching model vertex IDs when available.
-        auto addContour = [&](const std::vector<Vector2d>& contour) {
+        // Offset vertices have no source identity unless the builder preserved an exact source match.
+        auto addContour = [&](const std::vector<Vector2d>& contour,
+            const std::vector<std::optional<std::uint64_t>>& sourceIds) {
+            // Each region uses local indices shared by its point array, output vertices, and contours.
             ContourIndices contourIndices;
             contourIndices.vertices.reserve(contour.size());
-            for (const Vector2d& position : contour) {
-                std::optional<VertexId> sourceId;
-                for (const Vertex& vertex : model.Vertices())
-                    if (vertex.position == position) { sourceId = vertex.id; break; }
+            for (std::size_t i = 0; i < contour.size(); ++i) {
+                const Vector2d& position = contour[i];
                 const std::size_t index = input.points.size();
                 input.points.push_back(position);
-                input.mesh.vertices.push_back({sourceId, position});
+                input.mesh.vertices.push_back({sourceIds[i], position});
                 contourIndices.vertices.push_back(index);
             }
             if (contourIndices.vertices.size() >= 3) input.contours.push_back(std::move(contourIndices));
         };
-        addContour(region.outerContour);
-        for (const std::vector<Vector2d>& holeContour : region.holeContours) addContour(holeContour);
-        if (input.contours.empty()) continue;
-
+        addContour(region.outerContour, region.outerSourceIds);
+        for (std::size_t i = 0; i < region.holeContours.size(); ++i)
+            addContour(region.holeContours[i], region.holeSourceIds[i]);
         std::set<Edge> constraints;
-        if (!BuildConstraints(input, constraints, error) || input.points.size() < 3 || HasCoincidentPoints(input.points))
-            return {GenerationStatus::Failed, {}, "Offset contours contain invalid or coincident vertices."};
+        BuildConstraints(input, constraints);
         std::vector<Triangle> triangles;
+        // Delaunay seed, constraint recovery, then unconstrained-edge legalization form one failure-aware stage.
         if (!BuildConstrainedTriangulation(input, constraints, triangles, error))
             return {GenerationStatus::Failed, {}, "Could not triangulate offset contours: " + error};
         KeepTrianglesInsideRegion(input, triangles, input.mesh);
         if (!UsesEveryInputVertex(input.mesh))
             return {GenerationStatus::Failed, {}, "An offset walkable component was not completely triangulated."};
 
-        AppendComponentMesh(input, constraints, combined);
-        ++componentCount;
+        AppendRegionMesh(input, constraints, combined);
+        ++regionCount;
     }
 
-    if (componentCount == 0 || combined.triangles.empty())
+    if (regionCount == 0 || combined.triangles.empty())
         return {GenerationStatus::Failed, {}, "Agent radius leaves no triangulatable walkable area."};
+    // This final pass checks reciprocal links and manifold edge use; only then is the draft published.
     if (!BuildFinalAdjacency(combined))
         return {GenerationStatus::Failed, {}, "Generated navmesh has non-manifold or invalid adjacency."};
-    return {GenerationStatus::Success, std::move(combined), "Navmesh baked successfully."};
-}
-
-PathResult FindPath(const ConstrainedMesh& mesh, Vector2d start, Vector2d goal) {
-    PathResult result;
-    const std::size_t triangleCount = mesh.triangles.size();
-    if (triangleCount == 0) {
-        result.status = PathStatus::InvalidMesh;
-        return result;
-    }
-
-    // Confirm every triangle refers to vertices that exist before using geometry helpers.
-    for (const MeshTriangle& triangle : mesh.triangles) {
-        for (const std::size_t vertexIndex : triangle.vertices) {
-            if (vertexIndex >= mesh.vertices.size()) {
-                result.status = PathStatus::InvalidMesh;
-                return result;
-            }
-        }
-    }
-
-    // Find the first walkable triangle that contains the requested point.
-    const auto findContainingTriangle = [&](Vector2d point) -> std::optional<std::size_t> {
-        for (std::size_t triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex) {
-            const MeshTriangle& triangle = mesh.triangles[triangleIndex];
-            if (triangle.region == TriangleRegion::Traversable && ContainsPoint(mesh, triangle, point))
-                return triangleIndex;
-        }
-        return std::nullopt;
-    };
-    const auto startTriangle = findContainingTriangle(start);
-    if (!startTriangle) { result.status = PathStatus::StartOutsideMesh; return result; }
-    const auto goalTriangle = findContainingTriangle(goal);
-    if (!goalTriangle) { result.status = PathStatus::GoalOutsideMesh; return result; }
-
-    // A* stores the best known cost to each triangle and the previous triangle on its route.
-    const double infinity = std::numeric_limits<double>::infinity();
-    std::vector<double> costToTriangle(triangleCount, infinity);
-    std::vector<std::size_t> previousTriangle(triangleCount, triangleCount);
-    using QueueEntry = std::pair<double, std::size_t>;
-    std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> pendingTriangles;
-    costToTriangle[*startTriangle] = 0.0;
-    pendingTriangles.emplace(Centroid(mesh, mesh.triangles[*startTriangle]).distance(goal), *startTriangle);
-
-    // Expand adjacent walkable triangles, preferring those with the smallest estimated total cost.
-    while (!pendingTriangles.empty()) {
-        const auto [estimatedTotalCost, currentTriangleIndex] = pendingTriangles.top();
-        pendingTriangles.pop();
-        (void)estimatedTotalCost;
-        if (currentTriangleIndex == *goalTriangle) break;
-
-        const Vector2d currentCenter = Centroid(mesh, mesh.triangles[currentTriangleIndex]);
-        for (const auto& neighborIndex : mesh.triangles[currentTriangleIndex].neighbors) {
-            if (!neighborIndex) continue; // An empty slot is a boundary, so there is no triangle to enter.
-            if (*neighborIndex >= triangleCount ||
-                mesh.triangles[*neighborIndex].region != TriangleRegion::Traversable) {
-                result.status = PathStatus::InvalidMesh;
-                return result;
-            }
-
-            const Vector2d neighborCenter = Centroid(mesh, mesh.triangles[*neighborIndex]);
-            const double candidateCost = costToTriangle[currentTriangleIndex] + currentCenter.distance(neighborCenter);
-            if (candidateCost < costToTriangle[*neighborIndex]) {
-                costToTriangle[*neighborIndex] = candidateCost;
-                previousTriangle[*neighborIndex] = currentTriangleIndex;
-                const double estimatedRemainingCost = neighborCenter.distance(goal);
-                pendingTriangles.emplace(candidateCost + estimatedRemainingCost, *neighborIndex);
-            }
-        }
-    }
-
-    // Follow the saved previous-triangle links backwards to recover the route corridor.
-    if (*startTriangle != *goalTriangle && previousTriangle[*goalTriangle] == triangleCount) {
-        result.status = PathStatus::NoPath;
-        return result;
-    }
-    for (std::size_t triangleIndex = *goalTriangle;; triangleIndex = previousTriangle[triangleIndex]) {
-        result.triangleCorridor.push_back(triangleIndex);
-        if (triangleIndex == *startTriangle) break;
-    }
-    std::reverse(result.triangleCorridor.begin(), result.triangleCorridor.end());
-
-    // Turn each corridor connection into a left/right portal from the current triangle's winding.
-    struct Portal { Vector2d left; Vector2d right; };
-    std::vector<Portal> portals{{start, start}};
-    for (std::size_t corridorIndex = 0; corridorIndex < result.triangleCorridor.size() - 1; ++corridorIndex) {
-        const std::size_t currentTriangleIndex = result.triangleCorridor[corridorIndex];
-        const std::size_t nextTriangleIndex = result.triangleCorridor[corridorIndex + 1];
-        std::size_t sharedEdgeSlot = 3;
-        for (std::size_t edgeSlot = 0; edgeSlot < 3; ++edgeSlot) {
-            if (mesh.triangles[currentTriangleIndex].neighbors[edgeSlot] == nextTriangleIndex) {
-                sharedEdgeSlot = edgeSlot;
-                break;
-            }
-        }
-        if (sharedEdgeSlot == 3) {
-            result.status = PathStatus::InvalidMesh;
-            result.triangleCorridor.clear();
-            return result;
-        }
-        const auto& triangle = mesh.triangles[currentTriangleIndex];
-        const Vector2d edgeStart = mesh.vertices[triangle.vertices[(sharedEdgeSlot + 1) % 3]].position;
-        const Vector2d edgeEnd = mesh.vertices[triangle.vertices[(sharedEdgeSlot + 2) % 3]].position;
-        portals.push_back({edgeEnd, edgeStart});
-    }
-    portals.push_back({goal, goal});
-
-    // Pull a short route through the portal sequence, adding a waypoint when a portal corner closes the funnel.
-    result.waypoints.push_back(start);
-    Vector2d funnelTip = start;
-    Vector2d funnelLeft = portals[0].left;
-    Vector2d funnelRight = portals[0].right;
-    std::size_t funnelTipIndex = 0, funnelLeftIndex = 0, funnelRightIndex = 0;
-    for (std::size_t portalIndex = 1; portalIndex < portals.size(); ++portalIndex) {
-        const Vector2d newLeft = portals[portalIndex].left;
-        const Vector2d newRight = portals[portalIndex].right;
-        if (Cross(funnelRight - funnelTip, newRight - funnelTip) <= 0) {
-            if (funnelTip == funnelRight || Cross(funnelLeft - funnelTip, newRight - funnelTip) > 0) {
-                funnelRight = newRight;
-                funnelRightIndex = portalIndex;
-            } else {
-                result.waypoints.push_back(funnelLeft);
-                funnelTip = funnelLeft;
-                funnelTipIndex = funnelLeftIndex;
-                funnelLeft = funnelRight = funnelTip;
-                funnelLeftIndex = funnelRightIndex = funnelTipIndex;
-                portalIndex = funnelTipIndex;
-                continue;
-            }
-        }
-        if (Cross(funnelLeft - funnelTip, newLeft - funnelTip) >= 0) {
-            if (funnelTip == funnelLeft || Cross(funnelRight - funnelTip, newLeft - funnelTip) < 0) {
-                funnelLeft = newLeft;
-                funnelLeftIndex = portalIndex;
-            } else {
-                result.waypoints.push_back(funnelRight);
-                funnelTip = funnelRight;
-                funnelTipIndex = funnelRightIndex;
-                funnelLeft = funnelRight = funnelTip;
-                funnelLeftIndex = funnelRightIndex = funnelTipIndex;
-                portalIndex = funnelTipIndex;
-            }
-        }
-    }
-    if (result.waypoints.back() != goal) result.waypoints.push_back(goal);
-    result.status = PathStatus::Success;
-    return result;
+    return {GenerationStatus::Success, NavMesh(std::move(combined)), "Navmesh baked successfully."};
 }
 
 } // namespace cdt

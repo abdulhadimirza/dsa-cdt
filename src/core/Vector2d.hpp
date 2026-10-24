@@ -74,7 +74,8 @@ struct Vector2d {
     }
 
     [[nodiscard]] double length() const noexcept {
-        return std::sqrt(length_sq());
+        // hypot scales its intermediate arithmetic to reduce overflow and underflow risk.
+        return std::hypot(x, y);
     }
 
     [[nodiscard]] constexpr double distance_sq(const Vector2d& rhs) const noexcept {
