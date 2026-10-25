@@ -15,17 +15,19 @@ struct NavmeshBakeSession {
     bool bake_attempted{false};
     /// Status of the newest completion accepted by Apply.
     GenerationStatus last_bake_status{GenerationStatus::Failed};
-    /// Input identity associated with baked_mesh, used to detect stale output.
-    std::string baked_input_key;
-    /// Highest completion generation already applied; older completions are ignored.
-    std::uint64_t applied_generation{};
-    /// Input key last requested manually or automatically; also prevents auto-bake from undoing a user clear.
-    std::string last_requested_key;
+    /// Signature of the geometry and radius that produced baked_mesh, used to detect outdated output.
+    std::string baked_input_signature;
+    /// Highest request version already applied; older completions are ignored.
+    std::uint64_t applied_request_version{};
+    /// Signature most recently submitted, used to avoid duplicate work and undoing a user clear.
+    std::string last_requested_signature;
 
-    /// Ignore stale completions; accept newer status and replace mesh/key only on success.
+    /// Ignore results older than the latest accepted request version; update status for newer
+    /// results and replace the mesh and signature only when the bake succeeds.
     bool Apply(BakeCompletion&& completion);
-    /// Clears mesh state and rejects any asynchronous work issued before generation.
-    void Reset(std::uint64_t generation) noexcept;
+    /// Clear the displayed mesh and signatures, reset status, and reject work older than the
+    /// supplied request version.
+    void Reset(std::uint64_t request_version) noexcept;
 };
 
 } // namespace cdt

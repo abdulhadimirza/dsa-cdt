@@ -70,25 +70,32 @@ std::string LoopKey(EdgeType type, const std::vector<VertexId>& vertices) {
 
 } // namespace
 
-// Adds a vertex and returns its newly assigned ID.
+// Add one vertex at the supplied position, advance the model version, and return its new ID.
 VertexId GeometryModel::AddVertex(Vector2d position) {
     const VertexId id = next_id++;
     vertices.push_back(Vertex{id, position});
+    AdvanceVersion();
     return id;
 }
 
-// Moves a vertex, rebuilding derived loops when the vertex exists.
+// Move the named vertex and rebuild its closed loops; report false if it is missing, and leave the
+// version unchanged when the requested position already matches the stored position.
 bool GeometryModel::MoveVertex(VertexId id, Vector2d position) {
+    // Locate the vertex whose position the caller wants to change.
     const auto it = std::find_if(vertices.begin(), vertices.end(), [id](const Vertex& vertex) {
         return vertex.id == id;
     });
     if (it == vertices.end()) return false;
+    // Avoid rebuilding loops or changing the version for a drag update with no movement.
+    if (it->position == position) return true;
     it->position = position;
     RebuildLoops();
+    AdvanceVersion();
     return true;
 }
 
-// Moves each requested vertex by an offset and rebuilds loops if anything moved.
+// Move every vertex whose ID is listed, then rebuild loops and advance the version when a
+// non-zero offset changed at least one selected vertex. Return whether any selected ID existed.
 bool GeometryModel::MoveVerticesBy(const std::vector<VertexId>& ids, Vector2d offset) {
     bool moved = false;
     for (Vertex& vertex : vertices) {
@@ -96,7 +103,11 @@ bool GeometryModel::MoveVerticesBy(const std::vector<VertexId>& ids, Vector2d of
         vertex.position = vertex.position + offset;
         moved = true;
     }
-    if (moved) RebuildLoops();
+    // A zero offset can find selected vertices without changing their geometry.
+    if (moved && offset != Vector2d{}) {
+        RebuildLoops();
+        AdvanceVersion();
+    }
     return moved;
 }
 
@@ -127,23 +138,29 @@ std::vector<VertexId> GeometryModel::ChainForVertex(VertexId id) const {
     return chain;
 }
 
-// Removes a vertex and its incident edges, then rebuilds derived loops.
+// Remove the named vertex and all edges attached to it, rebuild loops, and advance the version.
+// Return false without changing the model when the vertex does not exist.
 bool GeometryModel::RemoveVertex(VertexId id) {
+    // Locate the vertex first so a missing ID leaves all model data untouched.
     const auto it = std::find_if(vertices.begin(), vertices.end(), [id](const Vertex& vertex) {
         return vertex.id == id;
     });
     if (it == vertices.end()) return false;
+    // Remove every edge attached to the vertex before removing the vertex itself.
     edges.erase(std::remove_if(edges.begin(), edges.end(), [id](const GeometryEdge& edge) {
         return edge.first == id || edge.second == id;
     }), edges.end());
     vertices.erase(it);
     RebuildLoops();
+    AdvanceVersion();
     return true;
 }
 
-// Adds an edge if its endpoints are valid and the undirected edge is not already present.
+// Add an edge when both endpoints exist and that edge is not already present, even in reverse;
+// rebuild loops and advance the version only after the edge is accepted.
 bool GeometryModel::AddEdge(VertexId first, VertexId second, EdgeType type) {
     if (first == second || !FindVertex(first) || !FindVertex(second)) return false;
+    // Treat reversed endpoints as the same undirected edge when checking for duplicates.
     const auto duplicate = std::find_if(edges.begin(), edges.end(), [=](const GeometryEdge& edge) {
         return edge.type == type && ((edge.first == first && edge.second == second) ||
             (edge.first == second && edge.second == first));
@@ -151,13 +168,16 @@ bool GeometryModel::AddEdge(VertexId first, VertexId second, EdgeType type) {
     if (duplicate != edges.end()) return false;
     edges.push_back(GeometryEdge{first, second, type});
     RebuildLoops();
+    AdvanceVersion();
     return true;
 }
 
-// Replaces all geometry only when the complete incoming state is valid.
+// Validate the complete incoming vertex and edge lists before replacing the model. Invalid input
+// leaves the current geometry and version untouched; accepted input rebuilds loops and advances it.
 bool GeometryModel::Replace(std::vector<Vertex> new_vertices, std::vector<GeometryEdge> new_edges) {
     std::unordered_set<VertexId> ids;
     VertexId new_next_id = 0;
+    // Check every position and ID before changing the current model.
     for (const Vertex& vertex : new_vertices) {
         if (!std::isfinite(vertex.position.x) || !std::isfinite(vertex.position.y) ||
             vertex.id == std::numeric_limits<VertexId>::max() || !ids.insert(vertex.id).second) return false;
@@ -165,6 +185,7 @@ bool GeometryModel::Replace(std::vector<Vertex> new_vertices, std::vector<Geomet
     }
 
     std::set<std::tuple<VertexId, VertexId, EdgeType>> unique_edges;
+    // Require valid, distinct endpoints and reject duplicate edges in either endpoint order.
     for (const GeometryEdge& edge : new_edges) {
         if (edge.first == edge.second || !ids.contains(edge.first) || !ids.contains(edge.second) ||
             (edge.type != EdgeType::Border && edge.type != EdgeType::Obstacle)) return false;
@@ -172,21 +193,25 @@ bool GeometryModel::Replace(std::vector<Vertex> new_vertices, std::vector<Geomet
         if (!unique_edges.emplace(endpoints.first, endpoints.second, edge.type).second) return false;
     }
 
+    // Commit only after all input checks pass, then rebuild derived loops for the accepted data.
     vertices = std::move(new_vertices);
     edges = std::move(new_edges);
     loops.clear();
     next_id = new_next_id;
     next_loop_completion_order = 0;
     RebuildLoops();
+    AdvanceVersion();
     return true;
 }
 
-// Removes all geometry and resets loop completion ordering.
+// Remove all vertices, edges, and loops, reset loop ordering, and advance the version even when
+// the model is already empty so callers can treat every Clear request as a cache invalidation.
 void GeometryModel::Clear() noexcept {
     vertices.clear();
     edges.clear();
     loops.clear();
     next_loop_completion_order = 0;
+    AdvanceVersion();
 }
 
 // Finds a vertex by ID, returning nullptr when the ID is not present.

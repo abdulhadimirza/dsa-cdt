@@ -46,14 +46,21 @@ public:
     [[nodiscard]] const std::vector<GeometryEdge>& Edges() const noexcept { return edges; }
     [[nodiscard]] const std::vector<GeometryLoop>& Loops() const noexcept { return loops; }
     [[nodiscard]] std::size_t VertexCount() const noexcept { return vertices.size(); }
+    /// Return the current geometry version. It advances after each successful geometry update,
+    /// including Replace and Clear, so cached results can tell when they no longer match the model.
+    [[nodiscard]] std::uint64_t Version() const noexcept { return version; }
 
 private:
     void RebuildLoops();
+    /// Mark one completed geometry update so dependent cached data can be refreshed.
+    void AdvanceVersion() noexcept { ++version; }
     std::vector<Vertex> vertices;
     std::vector<GeometryEdge> edges;
     std::vector<GeometryLoop> loops;
     VertexId next_id{0};
     std::uint64_t next_loop_completion_order{0};
+    /// Version of the current geometry state, advanced whenever a public operation changes it.
+    std::uint64_t version{0};
 };
 
 } // namespace cdt

@@ -17,24 +17,29 @@ NavmeshBakeCoordinator::~NavmeshBakeCoordinator() {
     if (worker.joinable()) worker.join();
 }
 
+// Store the validated geometry, radius, and matching signature in the waiting slot, replacing
+// older work that has not started. Return its version so the session can reject older results.
 std::uint64_t NavmeshBakeCoordinator::Request(std::optional<ValidatedNavmeshInput> geometry,
-    double agent_radius, std::string input_key) {
+    double agent_radius, std::string input_signature) {
     std::lock_guard lock(mutex);
-    if (stopping) return next_generation;
-    const auto generation = ++next_generation;
-    // A single pending slot coalesces rapid edits: the worker processes the newest requested state.
-    pending = Job{generation, std::move(input_key), std::move(geometry), agent_radius};
+    // Do not queue new work after shutdown has begun.
+    if (stopping) return next_request_version;
+    const auto request_version = ++next_request_version;
+        // Keep only one request that has not started; a newer request replaces the waiting one.
+    pending = Job{request_version, std::move(input_signature), std::move(geometry), agent_radius};
     wake.notify_one();
-    return generation;
+    return request_version;
 }
 
+// Remove waiting and completed work, then advance the version so an already-running job's result
+// will be recognized as outdated when it reaches the session.
 std::uint64_t NavmeshBakeCoordinator::InvalidatePending() {
     std::lock_guard lock(mutex);
-    // Advancing the generation makes any already-running completion rejectable by NavmeshBakeSession::Apply.
-    const auto generation = ++next_generation;
+    // Advancing the request version makes running completions rejectable by NavmeshBakeSession::Apply.
+    const auto request_version = ++next_request_version;
     pending.reset();
     completion.reset();
-    return generation;
+    return request_version;
 }
 
 std::optional<BakeCompletion> NavmeshBakeCoordinator::TakeCompletion() {
@@ -49,8 +54,11 @@ bool NavmeshBakeCoordinator::IsRunning() const {
     return running || pending.has_value();
 }
 
+// Wait for requests, generate outside the lock so new UI requests stay responsive, then publish
+// the result together with the version and signature of the request that produced it.
 void NavmeshBakeCoordinator::Run() {
     for (;;) {
+        // Hold the lock only while waiting for work and taking the newest waiting request.
         Job job;
         {
             std::unique_lock lock(mutex);
@@ -60,13 +68,13 @@ void NavmeshBakeCoordinator::Run() {
             pending.reset();
             running = true;
         }
-        // Generation is intentionally outside the mutex so UI requests remain responsive.
+        // Build the mesh outside the lock so the UI can submit requests while this takes time.
         GenerationResult result = NavmeshPipeline{}.Generate(job.geometry, job.agent_radius);
         {
             std::lock_guard lock(mutex);
             running = false;
-            // Publish as one tagged value for the session to reject stale generations safely.
-            completion = BakeCompletion{job.generation, std::move(job.input_key), std::move(result)};
+            // Publish the result with its request version so outdated work can be rejected safely.
+            completion = BakeCompletion{job.request_version, std::move(job.input_signature), std::move(result)};
         }
     }
 }

@@ -12,10 +12,13 @@
 
 namespace cdt {
 
-/// Worker output tagged with its request generation and the input identity used to produce it.
+/// Worker output tagged with its request version and the input signature used to produce it.
 struct BakeCompletion {
-    std::uint64_t generation{};
-    std::string input_key;
+    /// Request version lets the UI ignore a result when a newer request replaced it.
+    std::uint64_t request_version{};
+    /// Signature identifies the geometry and radius used to make result.
+    std::string input_signature;
+    /// Outcome and generated mesh returned by the background worker.
     GenerationResult result;
 };
 
@@ -28,10 +31,10 @@ public:
     NavmeshBakeCoordinator(const NavmeshBakeCoordinator&) = delete;
     NavmeshBakeCoordinator& operator=(const NavmeshBakeCoordinator&) = delete;
 
-    /// Replace the pending slot with a newer snapshot and return its monotonically increasing generation.
+    /// Replace the waiting request with newer validated input and return its request version.
     std::uint64_t Request(std::optional<ValidatedNavmeshInput> geometry,
-        double agent_radius, std::string input_key);
-    /// Discards queued and completed work and returns a generation that invalidates running work.
+        double agent_radius, std::string input_signature);
+    /// Discards queued and completed work and returns a version that invalidates running work.
     [[nodiscard]] std::uint64_t InvalidatePending();
     
     /// Take and clear the most recently completed bake, if one is available.
@@ -41,22 +44,31 @@ public:
     [[nodiscard]] bool IsRunning() const;
 
 private:
-    /// Captured immutable inputs let the worker generate without accessing the editable model.
+    /// Copied input values let the worker build a mesh without reading the editable model.
     struct Job {
-        std::uint64_t generation{};
-        std::string input_key;
+        /// Version assigned when this request entered the coordinator.
+        std::uint64_t request_version{};
+        /// Signature carried through to the result so it can be compared with current inputs.
+        std::string input_signature;
+        /// Validated geometry copied when the request was made.
         std::optional<ValidatedNavmeshInput> geometry;
+        /// Radius copied with the geometry for this bake.
         double agent_radius{};
     };
     /// Worker loop: wait for a job, run the pipeline without holding the lock, then publish completion.
     void Run();
     mutable std::mutex mutex;
     std::condition_variable wake;
+    /// Newest request waiting for the worker; newer requests replace this slot.
     std::optional<Job> pending;
+    /// Most recently completed request waiting for the UI to collect it.
     std::optional<BakeCompletion> completion;
     std::thread worker;
-    std::uint64_t next_generation{0};
+    /// Next number used to order requests and reject results from older work.
+    std::uint64_t next_request_version{0};
+    /// True while the worker is generating a mesh for a request.
     bool running{false};
+    /// Tells the waiting worker to stop and exit.
     bool stopping{false};
 };
 
