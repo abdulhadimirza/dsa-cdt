@@ -18,45 +18,51 @@ NavmeshBakeCoordinator::~NavmeshBakeCoordinator() {
 }
 
 // Store the validated geometry, radius, and matching signature in the waiting slot, replacing
-// older work that has not started. Return its version so the session can reject older results.
+// older work that has not started. Its version preserves the worker's completion order.
 std::uint64_t NavmeshBakeCoordinator::Request(std::optional<ValidatedNavmeshInput> geometry,
-    double agent_radius, std::string input_signature) {
+    double agent_radius, std::string input_signature, bool force_full) {
     std::lock_guard lock(mutex);
     // Do not queue new work after shutdown has begun.
     if (stopping) return next_request_version;
     const auto request_version = ++next_request_version;
-        // Keep only one request that has not started; a newer request replaces the waiting one.
-    pending = Job{request_version, std::move(input_signature), std::move(geometry), agent_radius};
+    // Keep only one request that has not started; a newer request replaces the waiting one.
+    pending = Job{request_version, std::move(input_signature), std::move(geometry), agent_radius, force_full};
     wake.notify_one();
     return request_version;
 }
 
-// Remove waiting and completed work, then advance the version so an already-running job's result
-// will be recognized as outdated when it reaches the session.
+// Remove waiting and completed work, then fence any already-running job from publication.
 std::uint64_t NavmeshBakeCoordinator::InvalidatePending() {
-    std::lock_guard lock(mutex);
-    // Advancing the request version makes running completions rejectable by NavmeshBakeSession::Apply.
-    const auto request_version = ++next_request_version;
-    pending.reset();
-    completion.reset();
+    std::uint64_t request_version{};
+    {
+        std::lock_guard lock(mutex);
+        // Advancing the version fences running jobs and releases any waiter for an invalidated request.
+        request_version = ++next_request_version;
+        minimum_valid_request_version = request_version;
+        pending.reset();
+        completions.clear();
+    }
+    wake.notify_all();
     return request_version;
 }
 
 std::optional<BakeCompletion> NavmeshBakeCoordinator::TakeCompletion() {
     std::lock_guard lock(mutex);
-    auto result = std::move(completion);
-    completion.reset();
+    if (completions.empty()) return std::nullopt;
+    auto result = std::move(completions.front());
+    completions.pop_front();
     return result;
 }
 
 bool NavmeshBakeCoordinator::IsRunning() const {
     std::lock_guard lock(mutex);
-    return running || pending.has_value();
+    return running || pending.has_value() || !completions.empty();
 }
 
 // Wait for requests, generate outside the lock so new UI requests stay responsive, then publish
 // the result together with the version and signature of the request that produced it.
 void NavmeshBakeCoordinator::Run() {
+    NavmeshPipeline pipeline;
     for (;;) {
         // Hold the lock only while waiting for work and taking the newest waiting request.
         Job job;
@@ -69,13 +75,15 @@ void NavmeshBakeCoordinator::Run() {
             running = true;
         }
         // Build the mesh outside the lock so the UI can submit requests while this takes time.
-        GenerationResult result = NavmeshPipeline{}.Generate(job.geometry, job.agent_radius);
+        GenerationResult result = pipeline.Generate(job.geometry, job.agent_radius, job.force_full);
         {
             std::lock_guard lock(mutex);
             running = false;
-            // Publish the result with its request version so outdated work can be rejected safely.
-            completion = BakeCompletion{job.request_version, std::move(job.input_signature), std::move(result)};
+            // Publish every valid completed snapshot in order, even when newer geometry is queued.
+            if (job.request_version >= minimum_valid_request_version)
+                completions.push_back(BakeCompletion{job.request_version, std::move(job.input_signature), std::move(result)});
         }
+        wake.notify_all();
     }
 }
 
