@@ -69,6 +69,7 @@ add_executable(${PROJECT_NAME}
     src/app/NavmeshBakeCoordinator.cpp
     src/app/NavmeshBakeSession.cpp
     src/app/NavmeshInputKey.cpp
+    src/app/MapFile.cpp
     src/app/PathfindingSession.cpp
     # Queries against the immutable generated navmesh.
     src/pathfinding/Pathfinder.cpp

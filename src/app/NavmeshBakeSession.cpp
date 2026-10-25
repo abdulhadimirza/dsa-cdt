@@ -17,4 +17,13 @@ bool NavmeshBakeSession::Apply(BakeCompletion&& completion) {
     return true;
 }
 
+void NavmeshBakeSession::Reset(std::uint64_t generation) noexcept {
+    baked_mesh.reset();
+    bake_attempted = false;
+    last_bake_status = GenerationStatus::Failed;
+    baked_input_key.clear();
+    applied_generation = generation;
+    last_auto_requested_key.clear();
+}
+
 } // namespace cdt

@@ -24,6 +24,8 @@ struct NavmeshBakeSession {
 
     /// Ignore stale completions; accept newer status and replace mesh/key only on success.
     bool Apply(BakeCompletion&& completion);
+    /// Clears mesh state and rejects any asynchronous work issued before generation.
+    void Reset(std::uint64_t generation) noexcept;
 };
 
 } // namespace cdt

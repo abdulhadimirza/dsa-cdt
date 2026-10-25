@@ -59,7 +59,8 @@ std::optional<CanvasClick> EditorController::Update(const EditorInput& input, Ge
         return std::nullopt;
     }
 
-    const std::optional<CanvasClick> canvas_click = input.left_pressed
+    const bool placing_endpoint = state.active_tool == EditorTool::Start || state.active_tool == EditorTool::Goal;
+    const std::optional<CanvasClick> canvas_click = (input.left_pressed || (placing_endpoint && input.left_down))
         ? std::optional<CanvasClick>{CanvasClick{state.active_tool, input.cursor_world}}
         : std::nullopt;
 
@@ -69,6 +70,7 @@ std::optional<CanvasClick> EditorController::Update(const EditorInput& input, Ge
 
     if (state.active_tool == EditorTool::Start || state.active_tool == EditorTool::Goal) {
         state.hovered_vertex.reset();
+        state.status_message.clear();
         return canvas_click;
     }
 

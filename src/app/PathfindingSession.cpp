@@ -31,6 +31,16 @@ void PathfindingSession::ClearForMeshDeletion() noexcept {
     result.reset();
 }
 
+void PathfindingSession::ClearPath() noexcept {
+    result.reset();
+}
+
+void PathfindingSession::Clear() noexcept {
+    start.reset();
+    goal.reset();
+    result.reset();
+}
+
 /// Recomputes only when auto-update is enabled and a mesh and both endpoints are available.
 void PathfindingSession::UpdateIfEnabled(const NavMesh* mesh, bool auto_update) {
     if (auto_update && mesh && start && goal) Recompute(*mesh);

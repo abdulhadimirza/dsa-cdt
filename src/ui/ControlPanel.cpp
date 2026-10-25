@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace cdt {
 namespace {
@@ -27,6 +28,7 @@ void ControlPanel::DrawPathfindingControls(ControlRequests& requests,
     ImGui::Checkbox("Auto Update Path", &auto_update_path);
     requests.generate_path = ImGui::Button("Generate Path", ImVec2(-1.0f, 24.0f)) &&
         has_baked_mesh && view.start.has_value() && view.goal.has_value();
+    requests.clear_path = ImGui::Button("Clear Path", ImVec2(-1.0f, 24.0f));
     if (!has_baked_mesh || !view.start || !view.goal)
         ImGui::TextDisabled("Requires a baked navmesh, start, and goal.");
     if (view.result) {
@@ -62,6 +64,13 @@ ControlRequests ControlPanel::Draw(const ControlPanelContext& context) {
     ImGui::SetNextWindowSize(ImVec2(360.0f, 680.0f), ImGuiCond_FirstUseEver);
 
     if (ImGui::Begin("Geometry & Navmesh Controls")) {
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Map File");
+        ImGui::InputText("Path (.txt)", map_path, sizeof(map_path));
+        requests.save_map = ImGui::Button("Save Map", ImVec2(-1.0f, 24.0f));
+        requests.load_map = ImGui::Button("Load Map", ImVec2(-1.0f, 24.0f));
+        if (requests.save_map || requests.load_map) requests.map_path = map_path;
+        if (!map_status.empty()) ImGui::TextWrapped("%s", map_status.c_str());
+        ImGui::Separator();
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Geometry & Editing");
         ImGui::Separator();
         ImGui::Text("Total Points: %zu", model.VertexCount());
@@ -116,8 +125,13 @@ ControlRequests ControlPanel::Draw(const ControlPanelContext& context) {
         DrawPathfindingControls(requests, context.pathfinding, bake.has_baked_mesh);
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Navmesh Setup & Bake");
+        float slider_radius = static_cast<float>(std::clamp(agent_radius, 0.0, 100.0));
+        if (ImGui::SliderFloat("Agent radius (0-100)", &slider_radius, 0.0f, 100.0f, "%.2f")) {
+            agent_radius = slider_radius;
+            requests.agent_radius = agent_radius;
+        }
         double edited_radius = agent_radius;
-        if (ImGui::InputDouble("Agent radius (world units)", &edited_radius, 0.1, 1.0, "%.2f")) {
+        if (ImGui::InputDouble("Agent radius value", &edited_radius, 0.1, 1.0, "%.2f")) {
             agent_radius = std::isfinite(edited_radius) ? std::max(0.0, edited_radius) : 0.0;
             requests.agent_radius = agent_radius;
         }
@@ -148,6 +162,10 @@ ControlRequests ControlPanel::Draw(const ControlPanelContext& context) {
     ImGui::End();
 
     return requests;
+}
+
+void ControlPanel::SetMapStatus(std::string message) {
+    map_status = std::move(message);
 }
 
 } // namespace cdt

@@ -5,6 +5,7 @@
 #include "app/CameraController.hpp"
 #include "app/NavmeshBakeCoordinator.hpp"
 #include "app/NavmeshBakeSession.hpp"
+#include "app/MapFile.hpp"
 #include "app/NavmeshInputKey.hpp"
 #include "app/PathfindingSession.hpp"
 #include "cdt/ConstrainedDelaunay.hpp"
@@ -24,25 +25,21 @@ constexpr int screen_width = 1280;
 constexpr int screen_height = 800;
 constexpr Color background_color{22, 25, 32, 255};
 
-/// Interprets navigation-tool canvas clicks and updates path state and editor feedback.
-void DispatchNavigationClick(const cdt::CanvasClick& click, cdt::EditorController& editor,
-    cdt::PathfindingSession& pathfinding, const cdt::NavMesh* mesh, bool auto_update) {
+/// Applies one endpoint placement update to the pathfinding session.
+void DispatchNavigationClick(const cdt::CanvasClick& click, cdt::PathfindingSession& pathfinding,
+    const cdt::NavMesh* mesh, bool auto_update) {
     cdt::PathEndpoint endpoint = cdt::PathEndpoint::Start;
-    const char* status = nullptr;
     switch (click.tool) {
         case cdt::EditorTool::Start:
             endpoint = cdt::PathEndpoint::Start;
-            status = "Start point set.";
             break;
         case cdt::EditorTool::Goal:
             endpoint = cdt::PathEndpoint::Goal;
-            status = "Goal point set.";
             break;
         default:
             return;
     }
     pathfinding.SetEndpoint(endpoint, click.world_position, mesh, auto_update);
-    editor.SetStatusMessage(status);
 }
 
 } // namespace
@@ -97,7 +94,7 @@ int main() {
 
         const cdt::NavMesh* accepted_mesh = bake_session.baked_mesh ? &*bake_session.baked_mesh : nullptr;
         if (canvas_click)
-            DispatchNavigationClick(*canvas_click, editor, pathfinding_session, accepted_mesh,
+            DispatchNavigationClick(*canvas_click, pathfinding_session, accepted_mesh,
                 control_panel.AutoUpdatePath() && !mesh_replaced);
         if (mesh_replaced && bake_session.baked_mesh)
             pathfinding_session.OnMeshAccepted(*bake_session.baked_mesh, control_panel.AutoUpdatePath());
@@ -149,6 +146,26 @@ int main() {
             bake_session.baked_mesh.reset();
             pathfinding_session.ClearForMeshDeletion();
         }
+        if (requests.clear_path) pathfinding_session.ClearPath();
+        if (requests.save_map) {
+            std::string error;
+            if (cdt::SaveMapFile(requests.map_path, geometry, error))
+                control_panel.SetMapStatus("Map saved.");
+            else control_panel.SetMapStatus(error);
+        }
+        bool map_loaded = false;
+        if (requests.load_map) {
+            std::string error;
+            if (cdt::LoadMapFile(requests.map_path, geometry, error)) {
+                editor.ClearInteraction();
+                pathfinding_session.Clear();
+                bake_session.Reset(bake_coordinator.InvalidatePending());
+                control_panel.SetMapStatus("Map loaded. Bake the navmesh to use pathfinding.");
+                map_loaded = true;
+            } else {
+                control_panel.SetMapStatus(error);
+            }
+        }
         if (requests.clear_geometry) {
             geometry.Clear();
             editor.ClearInteraction();
@@ -157,7 +174,7 @@ int main() {
         if (requests.generate_path && bake_session.baked_mesh)
             pathfinding_session.Generate(*bake_session.baked_mesh);
 
-        if (control_panel.AutoBakeNavmesh() && bake_session.baked_mesh && bake_input_key != bake_session.baked_input_key &&
+        if (!map_loaded && control_panel.AutoBakeNavmesh() && bake_session.baked_mesh && bake_input_key != bake_session.baked_input_key &&
             bake_input_key != bake_session.last_auto_requested_key) {
             (void)bake_coordinator.Request(validation.validated_navmesh_input, agent_radius, bake_input_key);
             bake_session.last_auto_requested_key = bake_input_key;

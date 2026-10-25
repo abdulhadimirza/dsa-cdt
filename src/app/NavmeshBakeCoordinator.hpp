@@ -31,6 +31,8 @@ public:
     /// Replace the pending slot with a newer snapshot and return its monotonically increasing generation.
     std::uint64_t Request(std::optional<ValidatedNavmeshInput> geometry,
         double agent_radius, std::string input_key);
+    /// Discards queued and completed work and returns a generation that invalidates running work.
+    [[nodiscard]] std::uint64_t InvalidatePending();
     
     /// Take and clear the most recently completed bake, if one is available.
     [[nodiscard]] std::optional<BakeCompletion> TakeCompletion();

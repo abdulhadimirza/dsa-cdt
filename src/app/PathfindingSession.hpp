@@ -23,6 +23,10 @@ public:
     void OnMeshAccepted(const NavMesh& mesh, bool auto_update);
     /// Computes a route on demand when both endpoints are set.
     void Generate(const NavMesh& mesh);
+    /// Clears only the generated result, preserving the two endpoints.
+    void ClearPath() noexcept;
+    /// Clears the generated result and both endpoints.
+    void Clear() noexcept;
     /// Clears the displayed route after the accepted mesh is deleted.
     void ClearForMeshDeletion() noexcept;
 

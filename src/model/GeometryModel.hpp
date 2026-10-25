@@ -37,6 +37,8 @@ public:
     [[nodiscard]] std::vector<VertexId> ChainForVertex(VertexId id) const;
     [[nodiscard]] bool RemoveVertex(VertexId id);
     [[nodiscard]] bool AddEdge(VertexId first, VertexId second, EdgeType type);
+    /// Replaces geometry after validating IDs, positions, and edge references.
+    [[nodiscard]] bool Replace(std::vector<Vertex> new_vertices, std::vector<GeometryEdge> new_edges);
     void Clear() noexcept;
 
     [[nodiscard]] const Vertex* FindVertex(VertexId id) const noexcept;

@@ -1,8 +1,12 @@
-#include "model/GeometryModel.hpp"
 #include "core/GeometryPredicates.hpp"
+#include "model/GeometryModel.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -146,6 +150,33 @@ bool GeometryModel::AddEdge(VertexId first, VertexId second, EdgeType type) {
     });
     if (duplicate != edges.end()) return false;
     edges.push_back(GeometryEdge{first, second, type});
+    RebuildLoops();
+    return true;
+}
+
+// Replaces all geometry only when the complete incoming state is valid.
+bool GeometryModel::Replace(std::vector<Vertex> new_vertices, std::vector<GeometryEdge> new_edges) {
+    std::unordered_set<VertexId> ids;
+    VertexId new_next_id = 0;
+    for (const Vertex& vertex : new_vertices) {
+        if (!std::isfinite(vertex.position.x) || !std::isfinite(vertex.position.y) ||
+            vertex.id == std::numeric_limits<VertexId>::max() || !ids.insert(vertex.id).second) return false;
+        new_next_id = std::max(new_next_id, vertex.id + 1);
+    }
+
+    std::set<std::tuple<VertexId, VertexId, EdgeType>> unique_edges;
+    for (const GeometryEdge& edge : new_edges) {
+        if (edge.first == edge.second || !ids.contains(edge.first) || !ids.contains(edge.second) ||
+            (edge.type != EdgeType::Border && edge.type != EdgeType::Obstacle)) return false;
+        const auto endpoints = std::minmax(edge.first, edge.second);
+        if (!unique_edges.emplace(endpoints.first, endpoints.second, edge.type).second) return false;
+    }
+
+    vertices = std::move(new_vertices);
+    edges = std::move(new_edges);
+    loops.clear();
+    next_id = new_next_id;
+    next_loop_completion_order = 0;
     RebuildLoops();
     return true;
 }

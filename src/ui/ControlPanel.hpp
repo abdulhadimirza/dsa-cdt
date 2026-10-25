@@ -8,6 +8,7 @@
 #include "render/SceneRenderer.hpp"
 
 #include <optional>
+#include <string>
 
 #include "raylib.h"
 
@@ -16,6 +17,10 @@ namespace cdt {
 struct ControlRequests {
     bool reset_view{false};
     bool clear_geometry{false};
+    bool clear_path{false};
+    bool load_map{false};
+    bool save_map{false};
+    std::string map_path;
     bool bake_navmesh{false};
     bool delete_navmesh{false};
     bool generate_path{false};
@@ -54,6 +59,8 @@ public:
     [[nodiscard]] bool AutoBakeNavmesh() const noexcept { return auto_bake_navmesh; }
     /// Reports whether the panel's automatic route update option is enabled.
     [[nodiscard]] bool AutoUpdatePath() const noexcept { return auto_update_path; }
+    /// Updates transient feedback for map file operations.
+    void SetMapStatus(std::string message);
 
 private:
     /// Draws endpoint, route status, and path generation controls.
@@ -64,6 +71,8 @@ private:
     bool auto_bake_navmesh{false};
     bool auto_update_path{false};
     double agent_radius{0.0};
+    char map_path[512]{"map.txt"};
+    std::string map_status;
 };
 
 } // namespace cdt

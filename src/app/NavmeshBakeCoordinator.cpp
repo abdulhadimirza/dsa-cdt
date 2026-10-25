@@ -28,6 +28,14 @@ std::uint64_t NavmeshBakeCoordinator::Request(std::optional<ValidatedNavmeshInpu
     return generation;
 }
 
+std::uint64_t NavmeshBakeCoordinator::InvalidatePending() {
+    std::lock_guard lock(mutex);
+    const auto generation = ++next_generation;
+    pending.reset();
+    completion.reset();
+    return generation;
+}
+
 std::optional<BakeCompletion> NavmeshBakeCoordinator::TakeCompletion() {
     std::lock_guard lock(mutex);
     auto result = std::move(completion);
