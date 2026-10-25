@@ -30,6 +30,7 @@ std::uint64_t NavmeshBakeCoordinator::Request(std::optional<ValidatedNavmeshInpu
 
 std::uint64_t NavmeshBakeCoordinator::InvalidatePending() {
     std::lock_guard lock(mutex);
+    // Advancing the generation makes any already-running completion rejectable by NavmeshBakeSession::Apply.
     const auto generation = ++next_generation;
     pending.reset();
     completion.reset();

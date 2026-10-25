@@ -19,8 +19,8 @@ struct NavmeshBakeSession {
     std::string baked_input_key;
     /// Highest completion generation already applied; older completions are ignored.
     std::uint64_t applied_generation{};
-    /// Input key last requested by auto-bake, preventing duplicate requests per frame.
-    std::string last_auto_requested_key;
+    /// Input key last requested manually or automatically; also prevents auto-bake from undoing a user clear.
+    std::string last_requested_key;
 
     /// Ignore stale completions; accept newer status and replace mesh/key only on success.
     bool Apply(BakeCompletion&& completion);

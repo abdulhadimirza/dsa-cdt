@@ -59,6 +59,7 @@ std::optional<CanvasClick> EditorController::Update(const EditorInput& input, Ge
         return std::nullopt;
     }
 
+    // Start/goal tools emit the current cursor position on every held frame; other tools remain click-based.
     const bool placing_endpoint = state.active_tool == EditorTool::Start || state.active_tool == EditorTool::Goal;
     const std::optional<CanvasClick> canvas_click = (input.left_pressed || (placing_endpoint && input.left_down))
         ? std::optional<CanvasClick>{CanvasClick{state.active_tool, input.cursor_world}}

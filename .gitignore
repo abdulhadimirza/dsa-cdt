@@ -4,6 +4,7 @@
 
 .codegraph/
 .codebase-memory/
+map.json
 
 # --- Compiled Binaries & Libraries ---
 *.exe
@@ -63,3 +64,4 @@ Thumbs.db
 # --- Crash Logs & Temporary Files ---
 *.log
 *.tmp
+imgui.ini

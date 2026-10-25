@@ -23,7 +23,7 @@ void NavmeshBakeSession::Reset(std::uint64_t generation) noexcept {
     last_bake_status = GenerationStatus::Failed;
     baked_input_key.clear();
     applied_generation = generation;
-    last_auto_requested_key.clear();
+    last_requested_key.clear();
 }
 
 } // namespace cdt

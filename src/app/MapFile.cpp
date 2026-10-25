@@ -4,28 +4,41 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
-#include <limits>
-#include <locale>
-#include <sstream>
+#include <nlohmann/json.hpp>
 #include <utility>
 #include <vector>
 
 namespace cdt {
 namespace {
 
-bool HasTextExtension(const std::string& path) {
+using Json = nlohmann::json;
+
+bool HasJsonExtension(const std::string& path) {
     std::string extension = std::filesystem::path(path).extension().string();
     for (char& character : extension)
         character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-    return extension == ".txt";
+    return extension == ".json";
+}
+
+// Map IDs must be whole, nonnegative integers; accept either JSON integer storage form.
+bool ReadId(const Json& value, VertexId& id) {
+    if (!value.is_number_integer()) return false;
+    if (value.is_number_unsigned()) {
+        id = value.get<VertexId>();
+        return true;
+    }
+    const auto signed_id = value.get<std::int64_t>();
+    if (signed_id < 0) return false;
+    id = static_cast<VertexId>(signed_id);
+    return true;
 }
 
 } // namespace
 
+// Standard file streams resolve relative paths from the process working directory for both save and load.
 bool SaveMapFile(const std::string& path, const GeometryModel& model, std::string& error) {
-    if (!HasTextExtension(path)) {
-        error = "Map file name must end in .txt.";
+    if (!HasJsonExtension(path)) {
+        error = "Map file name must end in .json.";
         return false;
     }
     std::ofstream output(path, std::ios::trunc);
@@ -33,15 +46,26 @@ bool SaveMapFile(const std::string& path, const GeometryModel& model, std::strin
         error = "Could not open the map file for writing.";
         return false;
     }
-    output.imbue(std::locale::classic());
-    output << "DSA_CDT_MAP 1\nVERTICES " << model.Vertices().size() << '\n'
-        << std::setprecision(std::numeric_limits<double>::max_digits10);
-    for (const Vertex& vertex : model.Vertices())
-        output << "V " << vertex.id << ' ' << vertex.position.x << ' ' << vertex.position.y << '\n';
-    output << "EDGES " << model.Edges().size() << '\n';
-    for (const GeometryEdge& edge : model.Edges())
-        output << "E " << edge.first << ' ' << edge.second << ' '
-            << (edge.type == EdgeType::Border ? "BORDER" : "OBSTACLE") << '\n';
+    // Version the format; vertices store IDs/positions and edges reference IDs with their border/obstacle type.
+    Json document{
+        {"format", "dsa-cdt-map"},
+        {"version", 1},
+        {"vertices", Json::array()},
+        {"edges", Json::array()},
+    };
+    for (const Vertex& vertex : model.Vertices()) {
+        document["vertices"].push_back({
+            {"id", vertex.id}, {"x", vertex.position.x}, {"y", vertex.position.y},
+        });
+    }
+    for (const GeometryEdge& edge : model.Edges()) {
+        document["edges"].push_back({
+            {"first", edge.first},
+            {"second", edge.second},
+            {"type", edge.type == EdgeType::Border ? "border" : "obstacle"},
+        });
+    }
+    output << document.dump(2) << '\n';
     output.flush();
     if (!output) {
         error = "Could not write the complete map file.";
@@ -52,8 +76,8 @@ bool SaveMapFile(const std::string& path, const GeometryModel& model, std::strin
 }
 
 bool LoadMapFile(const std::string& path, GeometryModel& model, std::string& error) {
-    if (!HasTextExtension(path)) {
-        error = "Map file name must end in .txt.";
+    if (!HasJsonExtension(path)) {
+        error = "Map file name must end in .json.";
         return false;
     }
     std::ifstream input(path);
@@ -61,58 +85,68 @@ bool LoadMapFile(const std::string& path, GeometryModel& model, std::string& err
         error = "Could not open the map file for reading.";
         return false;
     }
-    input.imbue(std::locale::classic());
-
-    std::string marker;
-    int version = 0;
-    std::size_t vertex_count = 0;
-    if (!(input >> marker >> version) || marker != "DSA_CDT_MAP" || version != 1 ||
-        !(input >> marker >> vertex_count) || marker != "VERTICES") {
-        error = "Map header is invalid or unsupported.";
-        return false;
-    }
-
-    std::vector<Vertex> vertices;
-    vertices.reserve(vertex_count);
-    for (std::size_t i = 0; i < vertex_count; ++i) {
-        Vertex vertex;
-        if (!(input >> marker >> vertex.id >> vertex.position.x >> vertex.position.y) || marker != "V" ||
-            !std::isfinite(vertex.position.x) || !std::isfinite(vertex.position.y)) {
-            error = "Map contains an invalid vertex record.";
+    // Parse and validate temporary geometry before Replace so a bad file cannot partially change the map.
+    Json document;
+    try {
+        document = Json::parse(input);
+        if (!document.is_object() || document.value("format", std::string{}) != "dsa-cdt-map" ||
+            !document.contains("version") || !document["version"].is_number_integer() ||
+            document["version"].get<int>() != 1 || !document.contains("vertices") ||
+            !document["vertices"].is_array() || !document.contains("edges") ||
+            !document["edges"].is_array()) {
+            error = "Map JSON has an invalid or unsupported format.";
             return false;
         }
-        vertices.push_back(vertex);
-    }
 
-    std::size_t edge_count = 0;
-    if (!(input >> marker >> edge_count) || marker != "EDGES") {
-        error = "Map edge section is missing or invalid.";
-        return false;
-    }
-    std::vector<GeometryEdge> edges;
-    edges.reserve(edge_count);
-    for (std::size_t i = 0; i < edge_count; ++i) {
-        GeometryEdge edge;
-        std::string type;
-        if (!(input >> marker >> edge.first >> edge.second >> type) || marker != "E") {
-            error = "Map contains an invalid edge record.";
+        std::vector<Vertex> vertices;
+        vertices.reserve(document["vertices"].size());
+        for (const Json& item : document["vertices"]) {
+            if (!item.is_object() || !item.contains("id") || !item.contains("x") || !item.contains("y") ||
+                !item["x"].is_number() || !item["y"].is_number()) {
+                error = "Map JSON contains an invalid vertex record.";
+                return false;
+            }
+            Vertex vertex;
+            if (!ReadId(item["id"], vertex.id)) {
+                error = "Map JSON contains an invalid vertex ID.";
+                return false;
+            }
+            vertex.position = {item["x"].get<double>(), item["y"].get<double>()};
+            if (!std::isfinite(vertex.position.x) || !std::isfinite(vertex.position.y)) {
+                error = "Map JSON contains a non-finite vertex position.";
+                return false;
+            }
+            vertices.push_back(vertex);
+        }
+
+        std::vector<GeometryEdge> edges;
+        edges.reserve(document["edges"].size());
+        for (const Json& item : document["edges"]) {
+            if (!item.is_object() || !item.contains("first") || !item.contains("second") ||
+                !item.contains("type") || !item["type"].is_string()) {
+                error = "Map JSON contains an invalid edge record.";
+                return false;
+            }
+            GeometryEdge edge;
+            if (!ReadId(item["first"], edge.first) || !ReadId(item["second"], edge.second)) {
+                error = "Map JSON contains an invalid edge endpoint ID.";
+                return false;
+            }
+            const std::string type = item["type"].get<std::string>();
+            if (type == "border") edge.type = EdgeType::Border;
+            else if (type == "obstacle") edge.type = EdgeType::Obstacle;
+            else {
+                error = "Map JSON contains an unknown edge type.";
+                return false;
+            }
+            edges.push_back(edge);
+        }
+        if (!model.Replace(std::move(vertices), std::move(edges))) {
+            error = "Map JSON contains duplicate or invalid geometry references.";
             return false;
         }
-        if (type == "BORDER") edge.type = EdgeType::Border;
-        else if (type == "OBSTACLE") edge.type = EdgeType::Obstacle;
-        else {
-            error = "Map contains an unknown edge type.";
-            return false;
-        }
-        edges.push_back(edge);
-    }
-    input >> std::ws;
-    if (!input.eof()) {
-        error = "Map contains unexpected trailing data.";
-        return false;
-    }
-    if (!model.Replace(std::move(vertices), std::move(edges))) {
-        error = "Map contains duplicate or invalid geometry references.";
+    } catch (const Json::exception& exception) {
+        error = std::string("Could not parse map JSON: ") + exception.what();
         return false;
     }
     error.clear();

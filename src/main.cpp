@@ -141,12 +141,19 @@ int main() {
         if (requests.bake_navmesh) {
             bake_session.bake_attempted = true;
             (void)bake_coordinator.Request(validation.validated_navmesh_input, agent_radius, bake_input_key);
+            bake_session.last_requested_key = bake_input_key;
         }
-        if (requests.delete_navmesh) {
-            bake_session.baked_mesh.reset();
+        if (requests.clear_navmesh) {
+            // Reject queued/running bake results, then mark this input handled so auto-bake does not undo the clear.
+            bake_session.Reset(bake_coordinator.InvalidatePending());
+            bake_session.last_requested_key = bake_input_key;
             pathfinding_session.ClearForMeshDeletion();
         }
         if (requests.clear_path) pathfinding_session.ClearPath();
+        if (requests.clear_endpoints) pathfinding_session.Clear();
+        // Enabling auto-update computes the initial route once; later changes are handled by SetEndpoint/OnMeshAccepted.
+        if (requests.auto_update_path_enabled && bake_session.baked_mesh)
+            pathfinding_session.Generate(*bake_session.baked_mesh);
         if (requests.save_map) {
             std::string error;
             if (cdt::SaveMapFile(requests.map_path, geometry, error))
@@ -160,7 +167,7 @@ int main() {
                 editor.ClearInteraction();
                 pathfinding_session.Clear();
                 bake_session.Reset(bake_coordinator.InvalidatePending());
-                control_panel.SetMapStatus("Map loaded. Bake the navmesh to use pathfinding.");
+                control_panel.SetMapStatus("Map loaded. Navmesh cleared.");
                 map_loaded = true;
             } else {
                 control_panel.SetMapStatus(error);
@@ -174,10 +181,11 @@ int main() {
         if (requests.generate_path && bake_session.baked_mesh)
             pathfinding_session.Generate(*bake_session.baked_mesh);
 
-        if (!map_loaded && control_panel.AutoBakeNavmesh() && bake_session.baked_mesh && bake_input_key != bake_session.baked_input_key &&
-            bake_input_key != bake_session.last_auto_requested_key) {
+        // Do not require an existing mesh: a changed input may need the first bake as well as a rebake.
+        if (!map_loaded && control_panel.AutoBakeNavmesh() && bake_input_key != bake_session.baked_input_key &&
+            bake_input_key != bake_session.last_requested_key) {
             (void)bake_coordinator.Request(validation.validated_navmesh_input, agent_radius, bake_input_key);
-            bake_session.last_auto_requested_key = bake_input_key;
+            bake_session.last_requested_key = bake_input_key;
             bake_session.bake_attempted = true;
         }
 

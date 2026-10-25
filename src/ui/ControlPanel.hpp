@@ -18,11 +18,13 @@ struct ControlRequests {
     bool reset_view{false};
     bool clear_geometry{false};
     bool clear_path{false};
+    bool clear_endpoints{false};
+    bool auto_update_path_enabled{false};
     bool load_map{false};
     bool save_map{false};
     std::string map_path;
     bool bake_navmesh{false};
-    bool delete_navmesh{false};
+    bool clear_navmesh{false};
     bool generate_path{false};
     std::optional<EditorTool> selected_tool;
     std::optional<EditBehavior> selected_edit_behavior;
@@ -71,7 +73,7 @@ private:
     bool auto_bake_navmesh{false};
     bool auto_update_path{false};
     double agent_radius{0.0};
-    char map_path[512]{"map.txt"};
+    char map_path[512]{"map.json"};
     std::string map_status;
 };
 

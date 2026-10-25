@@ -25,10 +25,13 @@ void ControlPanel::DrawPathfindingControls(ControlRequests& requests,
     if (view.goal)
         ImGui::Text("Goal: (%.1f, %.1f)", view.goal->x, view.goal->y);
     else ImGui::TextDisabled("Goal: not set");
-    ImGui::Checkbox("Auto Update Path", &auto_update_path);
+    // This one-frame request fires only on the off-to-on transition; the setting itself persists in auto_update_path.
+    requests.auto_update_path_enabled =
+        ImGui::Checkbox("Auto Update Path", &auto_update_path) && auto_update_path;
     requests.generate_path = ImGui::Button("Generate Path", ImVec2(-1.0f, 24.0f)) &&
         has_baked_mesh && view.start.has_value() && view.goal.has_value();
     requests.clear_path = ImGui::Button("Clear Path", ImVec2(-1.0f, 24.0f));
+    requests.clear_endpoints = ImGui::Button("Clear Start/Goal", ImVec2(-1.0f, 24.0f));
     if (!has_baked_mesh || !view.start || !view.goal)
         ImGui::TextDisabled("Requires a baked navmesh, start, and goal.");
     if (view.result) {
@@ -65,7 +68,7 @@ ControlRequests ControlPanel::Draw(const ControlPanelContext& context) {
 
     if (ImGui::Begin("Geometry & Navmesh Controls")) {
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Map File");
-        ImGui::InputText("Path (.txt)", map_path, sizeof(map_path));
+        ImGui::InputText("Path (.json)", map_path, sizeof(map_path));
         requests.save_map = ImGui::Button("Save Map", ImVec2(-1.0f, 24.0f));
         requests.load_map = ImGui::Button("Load Map", ImVec2(-1.0f, 24.0f));
         if (requests.save_map || requests.load_map) requests.map_path = map_path;
@@ -137,7 +140,7 @@ ControlRequests ControlPanel::Draw(const ControlPanelContext& context) {
         }
         ImGui::Checkbox("Auto-bake on triangulation input changes", &auto_bake_navmesh);
         requests.bake_navmesh = ImGui::Button("Bake Navmesh", ImVec2(-1.0f, 24.0f));
-        requests.delete_navmesh = ImGui::Button("Delete Navmesh", ImVec2(-1.0f, 24.0f));
+        requests.clear_navmesh = ImGui::Button("Clear Navmesh", ImVec2(-1.0f, 24.0f));
         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Bake Status");
         ImGui::Text("Stored mesh: %s", bake.has_baked_mesh ? "yes" : "no");
         if (bake.running) ImGui::Text("Bake: running / queued");
