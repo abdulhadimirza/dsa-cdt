@@ -5,7 +5,6 @@
 
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -15,7 +14,7 @@ namespace cdt {
 
 /// Worker output tagged with its request version and the input signature used to produce it.
 struct BakeCompletion {
-    /// Request version preserves completion order and fences results invalidated by a reset.
+    /// Request version lets the UI ignore a result when a newer request replaced it.
     std::uint64_t request_version{};
     /// Signature identifies the geometry and radius used to make result.
     std::string input_signature;
@@ -34,14 +33,14 @@ public:
 
     /// Replace the waiting request with newer validated input and return its request version.
     std::uint64_t Request(std::optional<ValidatedNavmeshInput> geometry,
-        double agent_radius, std::string input_signature, bool force_full = false);
+        double agent_radius, std::string input_signature);
     /// Discards queued and completed work and returns a version that invalidates running work.
     [[nodiscard]] std::uint64_t InvalidatePending();
     
-    /// Take the oldest unconsumed completion so snapshots are applied in worker order.
+    /// Take and clear the most recently completed bake, if one is available.
     [[nodiscard]] std::optional<BakeCompletion> TakeCompletion();
 
-    /// Whether work is pending/running or completed snapshots still await the UI.
+    /// Whether a job is currently running or waiting in the single pending slot.
     [[nodiscard]] bool IsRunning() const;
 
 private:
@@ -55,8 +54,6 @@ private:
         std::optional<ValidatedNavmeshInput> geometry;
         /// Radius copied with the geometry for this bake.
         double agent_radius{};
-        /// Manual bake requests bypass local patching and preserve explicit user intent.
-        bool force_full{};
     };
     /// Worker loop: wait for a job, run the pipeline without holding the lock, then publish completion.
     void Run();
@@ -64,13 +61,11 @@ private:
     std::condition_variable wake;
     /// Newest request waiting for the worker; newer requests replace this slot.
     std::optional<Job> pending;
-    /// Completed snapshots waiting for the UI, kept in worker completion order.
-    std::deque<BakeCompletion> completions;
+    /// Most recently completed request waiting for the UI to collect it.
+    std::optional<BakeCompletion> completion;
     std::thread worker;
     /// Next number used to order requests and reject results from older work.
     std::uint64_t next_request_version{0};
-    /// Lowest request version still allowed to publish after an explicit invalidation.
-    std::uint64_t minimum_valid_request_version{0};
     /// True while the worker is generating a mesh for a request.
     bool running{false};
     /// Tells the waiting worker to stop and exit.

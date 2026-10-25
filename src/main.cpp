@@ -90,27 +90,17 @@ int main() {
 
         // Track whether the newly completed bake replaced the mesh used by navigation this frame.
         bool mesh_replaced = false;
-        // Keep each completed snapshot visible for at least one rendered frame when jobs queue up.
-        bool completion_applied_this_frame = false;
-        const auto applyCompletedBakes = [&] {
-            // Consume completions in order, one per frame, so intermediate patches are rendered.
-            if (completion_applied_this_frame) return;
-            auto completion = bake_coordinator.TakeCompletion();
-            if (!completion) return;
-            completion_applied_this_frame = true;
-            const std::string failure_message = completion->result.message;
+        if (auto completion = bake_coordinator.TakeCompletion()) {
             const bool applied = bake_session.Apply(std::move(*completion));
-            const bool successfulMeshUpdate =
-                applied && bake_session.last_bake_status == cdt::GenerationStatus::Success;
+            mesh_replaced = applied && bake_session.last_bake_status == cdt::GenerationStatus::Success;
             if (applied && bake_session.last_bake_status == cdt::GenerationStatus::Failed)
-                std::cerr << "Navmesh generation failed: " << failure_message << '\n';
-            mesh_replaced = mesh_replaced || successfulMeshUpdate;
-            if (successfulMeshUpdate && bake_session.baked_mesh)
-                pathfinding_session.OnMeshAccepted(*bake_session.baked_mesh, control_panel.AutoUpdatePath());
-        };
-        applyCompletedBakes();
+                std::cerr << "Navmesh generation failed: " << completion->result.message << '\n';
+        }
 
-        // Endpoint clicks use the latest mesh completed before this point in the frame.
+        // Update navigation to the accepted mesh before handling any endpoint click this frame.
+        if (mesh_replaced && bake_session.baked_mesh)
+            pathfinding_session.OnMeshAccepted(*bake_session.baked_mesh, control_panel.AutoUpdatePath());
+        // Endpoint clicks must use the currently accepted mesh; a new bake may have changed it above.
         const cdt::NavMesh* accepted_mesh = bake_session.baked_mesh ? &*bake_session.baked_mesh : nullptr;
         if (canvas_click)
             DispatchNavigationClick(*canvas_click, pathfinding_session, accepted_mesh,
@@ -185,7 +175,7 @@ int main() {
         if (requests.bake_navmesh) {
             bake_session.bake_attempted = true;
             (void)bake_coordinator.Request(geometry_derived_data.ValidationReport().validated_navmesh_input,
-                agent_radius, geometry_derived_data.BakeInputSignature(), true);
+                agent_radius, geometry_derived_data.BakeInputSignature());
             bake_session.last_requested_signature = geometry_derived_data.BakeInputSignature();
         }
         if (requests.clear_navmesh) {
@@ -199,7 +189,10 @@ int main() {
         if (requests.generate_path && bake_session.baked_mesh)
             pathfinding_session.Generate(*bake_session.baked_mesh);
 
-        // Queue the latest automatic update without blocking this frame's rendering.
+        // Capture the final route state after this frame's path requests for world drawing.
+        const cdt::pathfinding::PathfindingView pathfinding_view = pathfinding_session.View();
+
+        // Request automatic work once per changed signature, including the first bake when no mesh exists.
         if (control_panel.AutoBakeNavmesh() &&
             geometry_derived_data.BakeInputSignature() != bake_session.baked_input_signature &&
             geometry_derived_data.BakeInputSignature() != bake_session.last_requested_signature) {
@@ -208,12 +201,6 @@ int main() {
             bake_session.last_requested_signature = geometry_derived_data.BakeInputSignature();
             bake_session.bake_attempted = true;
         }
-
-        // Catch work that completed while controls and requests were being processed this frame.
-        applyCompletedBakes();
-
-        // Capture the final route state after this frame's mesh and path updates for world drawing.
-        const cdt::pathfinding::PathfindingView pathfinding_view = pathfinding_session.View();
 
         // Draw only after load, clear, validation, and bake decisions use this frame's final geometry.
         BeginMode2D(camera.GetCamera());

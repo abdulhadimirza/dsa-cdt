@@ -1,6 +1,5 @@
 #include "navmesh/WalkableRegionBuilder.hpp"
 #include "clipper2/clipper.h"
-#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -53,53 +52,6 @@ bool HasCoincidentOutputPoints(const Clipper2Lib::PathsD& contours) {
             points.push_back(candidate);
         }
     return false;
-}
-
-/// Convert every outer contour and hole to Clipper paths while preserving winding.
-Clipper2Lib::PathsD ToClipper(const WalkableRegionSet& regions) {
-    Clipper2Lib::PathsD paths;
-    for (const WalkableRegion& region : regions.Regions()) {
-        Clipper2Lib::PathD outer;
-        outer.reserve(region.outerContour.size());
-        for (const Vector2d& point : region.outerContour) outer.emplace_back(point.x, point.y);
-        paths.push_back(std::move(outer));
-        for (const auto& hole : region.holeContours) {
-            Clipper2Lib::PathD path;
-            path.reserve(hole.size());
-            for (const Vector2d& point : hole) path.emplace_back(point.x, point.y);
-            paths.push_back(std::move(path));
-        }
-    }
-    return paths;
-}
-
-/// Convert a Clipper boolean result to grouped outer contours and holes without source identities.
-std::vector<WalkableRegion> ToRegions(const Clipper2Lib::PathsD& contours, std::string& error) {
-    using namespace Clipper2Lib;
-    std::vector<WalkableRegion> regions;
-    for (const PathD& outer : contours) {
-        if (Area(outer) <= 0.0) continue;
-        WalkableRegion region;
-        region.outerContour = ToVector(outer);
-        if (!Usable(region.outerContour)) {
-            error = "Walkable-region difference contains invalid contours.";
-            return {};
-        }
-        region.outerSourceIds.resize(region.outerContour.size());
-        for (const PathD& contour : contours) {
-            if (Area(contour) >= 0.0 || contour.empty()) continue;
-            if (PointInPolygon(contour.front(), outer) != PointInPolygonResult::IsInside) continue;
-            auto hole = ToVector(contour);
-            if (!Usable(hole)) {
-                error = "Walkable-region difference contains invalid contours.";
-                return {};
-            }
-            region.holeSourceIds.emplace_back(hole.size());
-            region.holeContours.push_back(std::move(hole));
-        }
-        regions.push_back(std::move(region));
-    }
-    return regions;
 }
 // Preserve IDs only for exact points that survive offsetting unchanged; generated offset points
 // intentionally retain null identity.
@@ -183,85 +135,6 @@ std::optional<WalkableRegionSet> BuildWalkableRegions(
         error = "Agent radius leaves no triangulatable walkable area.";
         return std::nullopt;
     }
-    return WalkableRegionSetBuilder::Create(std::move(regions));
-}
-
-std::optional<WalkableRegionDelta> DiffWalkableRegions(
-    const WalkableRegionSet& previous, const WalkableRegionSet& current, std::string& error) {
-    using namespace Clipper2Lib;
-    const PathsD previousPaths = ToClipper(previous);
-    const PathsD currentPaths = ToClipper(current);
-    const PathsD addedContours = Difference(currentPaths, previousPaths, FillRule::NonZero, 8);
-    const PathsD removedContours = Difference(previousPaths, currentPaths, FillRule::NonZero, 8);
-    if (HasCoincidentOutputPoints(addedContours) || HasCoincidentOutputPoints(removedContours)) {
-        error = "Walkable-region difference contains coincident vertices.";
-        return std::nullopt;
-    }
-    WalkableRegionDelta delta;
-    delta.added = ToRegions(addedContours, error);
-    if (!error.empty()) return std::nullopt;
-    delta.removed = ToRegions(removedContours, error);
-    if (!error.empty()) return std::nullopt;
-    return delta;
-}
-
-std::optional<WalkableRegionSet> ClipWalkableRegionsToCavity(
-    const WalkableRegionSet& walkableRegions, const std::vector<std::vector<Vector2d>>& cavityLoops,
-    std::string& error) {
-    using namespace Clipper2Lib;
-    PathsD cavityPaths;
-    cavityPaths.reserve(cavityLoops.size());
-    for (const auto& loop : cavityLoops) {
-        if (!Usable(loop)) {
-            error = "Mesh cavity contains an invalid boundary loop.";
-            return std::nullopt;
-        }
-        PathD path;
-        path.reserve(loop.size());
-        for (const Vector2d& point : loop) path.emplace_back(point.x, point.y);
-        cavityPaths.push_back(std::move(path));
-    }
-    PathsD clipped = Intersect(ToClipper(walkableRegions), cavityPaths, FillRule::NonZero, 8);
-    if (clipped.empty()) {
-        error = "Mesh cavity contains no walkable area.";
-        return std::nullopt;
-    }
-    // Boolean clipping can remove collinear points; restore original cavity vertices so patch edges
-    // stitch to the exact edge segmentation used by the unchanged neighboring triangles.
-    std::vector<Vector2d> boundaryVertices;
-    for (const auto& loop : cavityLoops)
-        boundaryVertices.insert(boundaryVertices.end(), loop.begin(), loop.end());
-    for (PathD& contour : clipped) {
-        if (contour.size() < 2) continue;
-        PathD expanded;
-        for (std::size_t edgeIndex = 0; edgeIndex < contour.size(); ++edgeIndex) {
-            const auto& first = contour[edgeIndex];
-            const auto& second = contour[(edgeIndex + 1) % contour.size()];
-            expanded.push_back(first);
-            const double dx = second.x - first.x, dy = second.y - first.y;
-            const double lengthSquared = dx * dx + dy * dy;
-            if (lengthSquared == 0.0) continue;
-            std::vector<std::pair<double, Vector2d>> pointsOnEdge;
-            for (const Vector2d& candidate : boundaryVertices) {
-                const double projection = (candidate.x - first.x) * dx + (candidate.y - first.y) * dy;
-                if (projection <= 0.0 || projection >= lengthSquared) continue;
-                const double cross = dx * (candidate.y - first.y) - dy * (candidate.x - first.x);
-                if (std::abs(cross) > 1e-8 * std::max(1.0, std::sqrt(lengthSquared))) continue;
-                pointsOnEdge.emplace_back(projection / lengthSquared, candidate);
-            }
-            std::sort(pointsOnEdge.begin(), pointsOnEdge.end(), [](const auto& left, const auto& right) {
-                return left.first < right.first;
-            });
-            for (const auto& [position, candidate] : pointsOnEdge) {
-                (void)position;
-                if (expanded.back().x != candidate.x || expanded.back().y != candidate.y)
-                    expanded.emplace_back(candidate.x, candidate.y);
-            }
-        }
-        contour = std::move(expanded);
-    }
-    auto regions = ToRegions(clipped, error);
-    if (!error.empty() || regions.empty()) return std::nullopt;
     return WalkableRegionSetBuilder::Create(std::move(regions));
 }
 }

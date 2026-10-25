@@ -1,6 +1,5 @@
 #include "cdt/ConstrainedDelaunay.hpp"
 #include "core/GeometryPredicates.hpp"
-#include "navmesh/WalkableRegionBuilder.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -13,7 +12,6 @@
 #include <optional>
 #include <set>
 #include <string>
-#include <cstdint>
 
 
 namespace cdt {
@@ -774,14 +772,14 @@ bool RecoverConstraint(const Edge& constraint, TriangleMesh& triangleMesh,
 /// @param points Coordinates for all vertex indices.
 /// @param fixedConstraintEdges Contour edges that must not be changed.
 /// @return True when every needed check is complete and topology is valid; false if the safety limit is hit.
-bool LegalizeFromEdges(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
-    const std::set<Edge>& fixedConstraintEdges, const std::set<Edge>& initialEdges) {
+bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
+    const std::set<Edge>& fixedConstraintEdges) {
     const std::size_t iterationLimit = triangleMesh.trianglesByEdge.size() * triangleMesh.trianglesByEdge.size() * 8 + 64;
     // Legalization: check shared, unconstrained edges and flip those that violate the Delaunay circle rule.
     // Changed faces add their edges back to the worklist; the limit prevents an endless loop.
     std::deque<Edge> edgesToCheck;
-    // Start with edges touching the changed cavity; newly changed faces extend legalization outward.
-    for (const Edge& edge : initialEdges) edgesToCheck.push_back(edge);
+    // Start with every current edge. Newly changed faces add their edges back for another check.
+    for (const auto& [edge, trianglesOnEdge] : triangleMesh.trianglesByEdge) { (void)trianglesOnEdge; edgesToCheck.push_back(edge); }
     std::size_t checkedEdgeCount = 0;
     while (!edgesToCheck.empty() && checkedEdgeCount++ < iterationLimit) {
         const Edge edge = edgesToCheck.front(); edgesToCheck.pop_front();
@@ -807,17 +805,6 @@ bool LegalizeFromEdges(TriangleMesh& triangleMesh, const std::vector<Vector2d>& 
     if (edgesToCheck.empty()) return triangleMesh.hasValidTopology;
     // End: the safety iterationLimit was reached before the mesh settled.
     return false;
-}
-
-/// Legalize every free edge during an initial full triangulation.
-bool Legalize(TriangleMesh& triangleMesh, const std::vector<Vector2d>& points,
-    const std::set<Edge>& fixedConstraintEdges) {
-    std::set<Edge> allEdges;
-    for (const auto& [edge, trianglesOnEdge] : triangleMesh.trianglesByEdge) {
-        (void)trianglesOnEdge;
-        allEdges.insert(edge);
-    }
-    return LegalizeFromEdges(triangleMesh, points, fixedConstraintEdges, allEdges);
 }
 
 /// Collect every required edge around every contour in this region.
@@ -931,150 +918,10 @@ void AppendRegionMesh(const InputGeometry& input, const std::set<Edge>& constrai
 
 } // namespace
 
-struct ConstrainedDelaunay::State {
-    /// Mesh vertices and matching coordinates retained by the mutable triangulation.
-    std::vector<MeshVertex> vertices;
-    std::vector<Vector2d> points;
-    /// Edge incidence and stable face slots allow cavity edits without renumbering live faces.
-    TriangleMesh triangleMesh;
-    /// Contour constraints that must remain protected from edge flips.
-    std::set<Edge> fixedConstraintEdges;
-    /// Cell-to-face lookup narrows dirty-area queries to nearby triangles.
-    std::map<std::pair<std::int64_t, std::int64_t>, std::set<TriangleIndex>> facesByCell;
-    /// Faces too large for economical cell insertion are checked against every query.
-    std::set<TriangleIndex> largeFaces;
-    /// Cell width is chosen once from the first full mesh and retained across local patches.
-    double spatialCellSize{1.0};
-    /// Return every live face whose cell overlaps the requested box.
-    [[nodiscard]] std::set<TriangleIndex> QueryFaces(const double minX, const double minY,
-        const double maxX, const double maxY) const {
-        const auto cellX = [&](double x) { return static_cast<std::int64_t>(std::floor(x / spatialCellSize)); };
-        const auto cellY = [&](double y) { return static_cast<std::int64_t>(std::floor(y / spatialCellSize)); };
-        const std::int64_t firstX = cellX(minX), lastX = cellX(maxX);
-        const std::int64_t firstY = cellY(minY), lastY = cellY(maxY);
-        const std::uint64_t cellCount = static_cast<std::uint64_t>(lastX - firstX + 1) *
-            static_cast<std::uint64_t>(lastY - firstY + 1);
-        std::set<TriangleIndex> result;
-        result.insert(largeFaces.begin(), largeFaces.end());
-        if (cellCount > 100000) {
-            for (TriangleIndex index = 0; index < triangleMesh.triangles.size(); ++index)
-                if (triangleMesh.triangles[index].isPresent) result.insert(index);
-            return result;
-        }
-        for (std::int64_t x = firstX; x <= lastX; ++x)
-            for (std::int64_t y = firstY; y <= lastY; ++y) {
-                const auto cell = facesByCell.find({x, y});
-                if (cell != facesByCell.end()) result.insert(cell->second.begin(), cell->second.end());
-            }
-        return result;
-    }
-    /// Rebuild the broad-phase cell map after face insertion, removal, or edge legalization.
-    void RebuildSpatialIndex() {
-        facesByCell.clear();
-        largeFaces.clear();
-        double minX = std::numeric_limits<double>::infinity();
-        double minY = std::numeric_limits<double>::infinity();
-        double maxX = -std::numeric_limits<double>::infinity();
-        double maxY = -std::numeric_limits<double>::infinity();
-        std::size_t faceCount = 0;
-        for (const StoredTriangle& triangle : triangleMesh.triangles) if (triangle.isPresent) {
-            ++faceCount;
-            for (std::size_t vertexIndex : triangle.vertexIndices) {
-                const Vector2d& point = points[vertexIndex];
-                minX = std::min(minX, point.x); maxX = std::max(maxX, point.x);
-                minY = std::min(minY, point.y); maxY = std::max(maxY, point.y);
-            }
-        }
-        const double area = (maxX - minX) * (maxY - minY);
-        spatialCellSize = std::max(std::sqrt(area / static_cast<double>(std::max<std::size_t>(faceCount, 1))), 1e-9);
-        const auto cellX = [&](double x) { return static_cast<std::int64_t>(std::floor(x / spatialCellSize)); };
-        const auto cellY = [&](double y) { return static_cast<std::int64_t>(std::floor(y / spatialCellSize)); };
-        for (TriangleIndex index = 0; index < triangleMesh.triangles.size(); ++index) {
-            const StoredTriangle& triangle = triangleMesh.triangles[index];
-            if (!triangle.isPresent) continue;
-            double faceMinX = std::numeric_limits<double>::infinity();
-            double faceMinY = std::numeric_limits<double>::infinity();
-            double faceMaxX = -std::numeric_limits<double>::infinity();
-            double faceMaxY = -std::numeric_limits<double>::infinity();
-            for (std::size_t vertexIndex : triangle.vertexIndices) {
-                const Vector2d& point = points[vertexIndex];
-                faceMinX = std::min(faceMinX, point.x); faceMaxX = std::max(faceMaxX, point.x);
-                faceMinY = std::min(faceMinY, point.y); faceMaxY = std::max(faceMaxY, point.y);
-            }
-            const auto firstX = cellX(faceMinX), lastX = cellX(faceMaxX);
-            const auto firstY = cellY(faceMinY), lastY = cellY(faceMaxY);
-            const std::uint64_t coveredCells = static_cast<std::uint64_t>(lastX - firstX + 1) *
-                static_cast<std::uint64_t>(lastY - firstY + 1);
-            if (coveredCells > 10000) {
-                largeFaces.insert(index);
-                continue;
-            }
-            for (std::int64_t x = firstX; x <= lastX; ++x)
-                for (std::int64_t y = firstY; y <= lastY; ++y) facesByCell[{x, y}].insert(index);
-        }
-    }
-};
-
-ConstrainedDelaunay::ConstrainedDelaunay() = default;
-ConstrainedDelaunay::~ConstrainedDelaunay() = default;
-ConstrainedDelaunay::ConstrainedDelaunay(ConstrainedDelaunay&&) noexcept = default;
-ConstrainedDelaunay& ConstrainedDelaunay::operator=(ConstrainedDelaunay&&) noexcept = default;
-
-void ConstrainedDelaunay::Reset() noexcept { state_.reset(); }
-
-std::optional<NavMesh> ConstrainedDelaunay::CreateSnapshot() const {
-    if (!state_ || !state_->triangleMesh.hasValidTopology) return std::nullopt;
-    ConstrainedMesh snapshot;
-    snapshot.vertices = state_->vertices;
-    std::vector<std::size_t> triangleRemap(state_->triangleMesh.triangles.size(),
-        std::numeric_limits<std::size_t>::max());
-    for (std::size_t oldIndex = 0; oldIndex < state_->triangleMesh.triangles.size(); ++oldIndex)
-        if (state_->triangleMesh.triangles[oldIndex].isPresent) {
-            triangleRemap[oldIndex] = snapshot.triangles.size();
-            snapshot.triangles.emplace_back();
-        }
-    for (std::size_t oldIndex = 0; oldIndex < state_->triangleMesh.triangles.size(); ++oldIndex) {
-        const StoredTriangle& stored = state_->triangleMesh.triangles[oldIndex];
-        if (!stored.isPresent) continue;
-        MeshTriangle triangle{stored.vertexIndices, {}, TriangleRegion::Traversable};
-        for (std::size_t slot = 0; slot < 3; ++slot) if (stored.neighborTriangleIndices[slot]) {
-            const std::size_t oldNeighbor = *stored.neighborTriangleIndices[slot];
-            if (oldNeighbor >= triangleRemap.size() || triangleRemap[oldNeighbor] == std::numeric_limits<std::size_t>::max())
-                return std::nullopt;
-            const StoredTriangle& neighbor = state_->triangleMesh.triangles[oldNeighbor];
-            const auto reciprocal = std::find(neighbor.neighborTriangleIndices.begin(),
-                neighbor.neighborTriangleIndices.end(), oldIndex);
-            if (reciprocal == neighbor.neighborTriangleIndices.end()) return std::nullopt;
-            triangle.neighbors[slot] = triangleRemap[oldNeighbor];
-        }
-        snapshot.triangles[triangleRemap[oldIndex]] = triangle;
-    }
-    for (const Edge& edge : state_->fixedConstraintEdges) {
-        if (edge[0] >= snapshot.vertices.size() || edge[1] >= snapshot.vertices.size()) return std::nullopt;
-        snapshot.constraints.push_back({edge[0], edge[1]});
-    }
-    for (const auto& [edge, uses] : state_->triangleMesh.trianglesByEdge) {
-        (void)edge;
-        if (uses.triangleCount == 0 || uses.triangleCount > 2) return std::nullopt;
-        for (std::size_t useIndex = 0; useIndex < uses.triangleCount; ++useIndex) {
-            const TriangleOnEdge use = uses.triangles[useIndex];
-            const auto neighbor = state_->triangleMesh.triangles[use.triangleIndex].neighborTriangleIndices[use.oppositeVertexSlot];
-            if (uses.triangleCount == 1 && neighbor) return std::nullopt;
-            if (uses.triangleCount == 2) {
-                const TriangleOnEdge other = uses.triangles[1 - useIndex];
-                if (!neighbor || *neighbor != other.triangleIndex) return std::nullopt;
-            }
-        }
-    }
-    for (const Edge& constraint : state_->fixedConstraintEdges)
-        if (!state_->triangleMesh.trianglesByEdge.contains(constraint)) return std::nullopt;
-    return NavMesh(std::move(snapshot));
-}
-
 /// Triangulate prepared walkable regions and publish a NavMesh only after the combined topology is valid.
 /// @param regions Sanitized outer contours and hole contours ready for triangulation.
 /// @return Success with an immutable NavMesh, or failure with a user-facing explanation and no mesh.
-GenerationResult ConstrainedDelaunay::Triangulate(const detail::WalkableRegionSet& regions) {
+GenerationResult ConstrainedDelaunay::Triangulate(const detail::WalkableRegionSet& regions) const {
     std::string error;
     ConstrainedMesh combined;
     std::size_t regionCount = 0;
@@ -1122,264 +969,7 @@ GenerationResult ConstrainedDelaunay::Triangulate(const detail::WalkableRegionSe
     // This final pass checks reciprocal links and manifold edge use; only then is the draft published.
     if (!BuildFinalAdjacency(combined))
         return {GenerationStatus::Failed, {}, "Generated navmesh has non-manifold or invalid adjacency."};
-    auto nextState = std::make_unique<State>();
-    nextState->vertices = combined.vertices;
-    nextState->points.reserve(combined.vertices.size());
-    for (const MeshVertex& vertex : combined.vertices) nextState->points.push_back(vertex.position);
-    for (const MeshTriangle& triangle : combined.triangles)
-        if (!AddTriangle(nextState->triangleMesh, triangle.vertices))
-            return {GenerationStatus::Failed, {}, "Could not initialize dynamic mesh adjacency."};
-    for (const auto& constraint : combined.constraints)
-        nextState->fixedConstraintEdges.insert(MakeEdge(constraint[0], constraint[1]));
-    nextState->RebuildSpatialIndex();
-    state_ = std::move(nextState);
     return {GenerationStatus::Success, NavMesh(std::move(combined)), "Navmesh baked successfully."};
-}
-
-GenerationResult ConstrainedDelaunay::Update(
-    const detail::WalkableRegionSet& currentRegions, const detail::WalkableRegionDelta& delta) {
-    if (!state_) return Triangulate(currentRegions);
-
-    // A no-op geometry delta keeps topology intact and only republishes its immutable snapshot.
-    if (delta.Empty()) {
-        auto snapshot = CreateSnapshot();
-        if (!snapshot) return {GenerationStatus::Failed, {}, "Unchanged dynamic mesh has invalid adjacency."};
-        return {GenerationStatus::Success, std::move(snapshot), "Navmesh is already current."};
-    }
-
-    struct Bounds { double minX, minY, maxX, maxY; };
-    std::vector<Bounds> changedBounds;
-    const auto addRegionBounds = [&](const std::vector<detail::WalkableRegion>& regions) {
-        for (const auto& region : regions) {
-            Bounds bounds{std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(),
-                -std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
-            const auto include = [&](const std::vector<Vector2d>& contour) {
-                for (const Vector2d& point : contour) {
-                    bounds.minX = std::min(bounds.minX, point.x); bounds.maxX = std::max(bounds.maxX, point.x);
-                    bounds.minY = std::min(bounds.minY, point.y); bounds.maxY = std::max(bounds.maxY, point.y);
-                }
-            };
-            include(region.outerContour);
-            for (const auto& hole : region.holeContours) include(hole);
-            if (std::isfinite(bounds.minX)) changedBounds.push_back(bounds);
-        }
-    };
-    addRegionBounds(delta.added);
-    addRegionBounds(delta.removed);
-
-    // Query triangles whose boxes overlap changed walkable space; a face ring closes the cavity.
-    std::set<TriangleIndex> cavityTriangles;
-    std::set<TriangleIndex> spatialCandidates;
-    for (const Bounds& changed : changedBounds) {
-        const auto candidates = state_->QueryFaces(changed.minX, changed.minY, changed.maxX, changed.maxY);
-        spatialCandidates.insert(candidates.begin(), candidates.end());
-    }
-    const auto pointInRegion = [](const Vector2d& point, const detail::WalkableRegion& region) {
-        if (!geometry::PointInPolygon(region.outerContour, point, geometry::BoundaryPolicy::Inside)) return false;
-        for (const auto& hole : region.holeContours)
-            if (geometry::PointInPolygon(hole, point, geometry::BoundaryPolicy::Inside)) return false;
-        return true;
-    };
-    const auto triangleIntersectsRegion = [&](const Triangle& triangle, const detail::WalkableRegion& region) {
-        std::array<Vector2d, 3> corners{
-            state_->points[triangle[0]], state_->points[triangle[1]], state_->points[triangle[2]]};
-        for (const Vector2d& corner : corners) if (pointInRegion(corner, region)) return true;
-        const auto contourIntersects = [&](const std::vector<Vector2d>& contour) {
-            for (const Vector2d& point : contour)
-                if (PointInTriangleInclusive(point, corners[0], corners[1], corners[2])) return true;
-            for (std::size_t triangleEdge = 0; triangleEdge < 3; ++triangleEdge) {
-                const Vector2d& firstTrianglePoint = corners[triangleEdge];
-                const Vector2d& secondTrianglePoint = corners[(triangleEdge + 1) % 3];
-                for (std::size_t contourEdge = 0; contourEdge < contour.size(); ++contourEdge) {
-                    const Vector2d& firstContourPoint = contour[contourEdge];
-                    const Vector2d& secondContourPoint = contour[(contourEdge + 1) % contour.size()];
-                    if (ProperlyIntersects(firstTrianglePoint, secondTrianglePoint,
-                        firstContourPoint, secondContourPoint) ||
-                        OnSegment(firstTrianglePoint, secondTrianglePoint, firstContourPoint) ||
-                        OnSegment(firstTrianglePoint, secondTrianglePoint, secondContourPoint) ||
-                        OnSegment(firstContourPoint, secondContourPoint, firstTrianglePoint) ||
-                        OnSegment(firstContourPoint, secondContourPoint, secondTrianglePoint)) return true;
-                }
-            }
-            return false;
-        };
-        if (contourIntersects(region.outerContour)) return true;
-        for (const auto& hole : region.holeContours) if (contourIntersects(hole)) return true;
-        return false;
-    };
-    for (TriangleIndex triangleIndex : spatialCandidates) {
-        const StoredTriangle& triangle = state_->triangleMesh.triangles[triangleIndex];
-        if (!triangle.isPresent) continue;
-        Bounds faceBounds{std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(),
-            -std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
-        for (std::size_t vertexIndex : triangle.vertexIndices) {
-            const Vector2d& point = state_->points[vertexIndex];
-            faceBounds.minX = std::min(faceBounds.minX, point.x); faceBounds.maxX = std::max(faceBounds.maxX, point.x);
-            faceBounds.minY = std::min(faceBounds.minY, point.y); faceBounds.maxY = std::max(faceBounds.maxY, point.y);
-        }
-        const bool intersectsChange = [&] {
-            for (const Bounds& changed : changedBounds)
-                if (faceBounds.minX <= changed.maxX && faceBounds.maxX >= changed.minX &&
-                    faceBounds.minY <= changed.maxY && faceBounds.maxY >= changed.minY)
-                    for (const auto* changedRegions : {&delta.added, &delta.removed})
-                        for (const auto& changedRegion : *changedRegions)
-                            if (triangleIntersectsRegion(triangle.vertexIndices, changedRegion)) return true;
-            return false;
-        }();
-        if (intersectsChange) {
-                cavityTriangles.insert(triangleIndex);
-        }
-    }
-    if (cavityTriangles.empty())
-        return {GenerationStatus::Failed, {}, "No existing faces overlap the changed walkable area."};
-    const std::set<TriangleIndex> seedTriangles = cavityTriangles;
-    for (TriangleIndex triangleIndex : seedTriangles)
-        for (const auto neighbor : state_->triangleMesh.triangles[triangleIndex].neighborTriangleIndices)
-            if (neighbor) cavityTriangles.insert(*neighbor);
-    const std::size_t liveFaceCount = static_cast<std::size_t>(std::count_if(
-        state_->triangleMesh.triangles.begin(), state_->triangleMesh.triangles.end(),
-        [](const StoredTriangle& triangle) { return triangle.isPresent; }));
-    if (cavityTriangles.size() >= liveFaceCount)
-        return {GenerationStatus::Failed, {}, "Local cavity reaches the complete mesh."};
-
-    // Exposed directed edges form simple cavity loops; the removed CCW faces keep the cavity on the left.
-    std::map<Edge, std::pair<std::size_t, Edge>> edgeUses;
-    for (TriangleIndex triangleIndex : cavityTriangles) {
-        const Triangle& triangle = state_->triangleMesh.triangles[triangleIndex].vertexIndices;
-        for (std::size_t corner = 0; corner < 3; ++corner) {
-            const std::size_t first = triangle[corner], second = triangle[(corner + 1) % 3];
-            auto& use = edgeUses[MakeEdge(first, second)];
-            ++use.first;
-            use.second = {first, second};
-        }
-    }
-    std::map<std::size_t, std::size_t> nextBoundaryVertex;
-    for (const auto& [edge, use] : edgeUses) {
-        if (use.first != 1) continue;
-        (void)edge;
-        if (!nextBoundaryVertex.emplace(use.second[0], use.second[1]).second)
-            return {GenerationStatus::Failed, {}, "Cavity boundary has a branching vertex."};
-    }
-    std::vector<std::vector<std::size_t>> cavityLoopIndices;
-    std::set<std::size_t> visitedBoundaryVertices;
-    for (const auto& [firstVertex, ignored] : nextBoundaryVertex) {
-        (void)ignored;
-        if (visitedBoundaryVertices.contains(firstVertex)) continue;
-        std::vector<std::size_t> loop;
-        std::size_t currentVertex = firstVertex;
-        while (visitedBoundaryVertices.insert(currentVertex).second) {
-            loop.push_back(currentVertex);
-            const auto nextVertex = nextBoundaryVertex.find(currentVertex);
-            if (nextVertex == nextBoundaryVertex.end()) break;
-            currentVertex = nextVertex->second;
-        }
-        if (currentVertex != firstVertex || loop.size() < 3)
-            return {GenerationStatus::Failed, {}, "Cavity boundary is open or degenerate."};
-        cavityLoopIndices.push_back(std::move(loop));
-    }
-
-    // The positive-winding loops are unchanged mesh interfaces. Negative loops are old holes that
-    // must be eligible for filling when an obstacle shrinks, so they are omitted from the clip mask.
-    std::vector<std::vector<Vector2d>> cavityOuterLoops;
-    std::set<Edge> cavityBoundaryEdges;
-    for (const auto& loopIndices : cavityLoopIndices) {
-        std::vector<Vector2d> loop;
-        loop.reserve(loopIndices.size());
-        for (std::size_t vertexIndex : loopIndices) loop.push_back(state_->points[vertexIndex]);
-        if (geometry::SignedTwiceArea(loop) <= 0.0) continue;
-        cavityOuterLoops.push_back(loop);
-        for (std::size_t i = 0; i < loopIndices.size(); ++i)
-            cavityBoundaryEdges.insert(MakeEdge(loopIndices[i], loopIndices[(i + 1) % loopIndices.size()]));
-    }
-    if (cavityOuterLoops.empty())
-        return {GenerationStatus::Failed, {}, "Local cavity has no outer boundary."};
-
-    std::string error;
-    auto patchRegions = detail::ClipWalkableRegionsToCavity(currentRegions, cavityOuterLoops, error);
-    if (!patchRegions) return {GenerationStatus::Failed, {}, std::move(error)};
-    ConstrainedDelaunay patchTriangulator;
-    GenerationResult patch = patchTriangulator.Triangulate(*patchRegions);
-    if (patch.status != GenerationStatus::Success || !patch.mesh)
-        return {GenerationStatus::Failed, {}, "Local cavity triangulation failed: " + patch.message};
-
-    // Prepare the replacement on a copy; only a fully stitched and legalized candidate is committed.
-    State candidate = *state_;
-    std::map<std::pair<double, double>, std::size_t> vertexIndicesByPosition;
-    for (std::size_t vertexIndex = 0; vertexIndex < candidate.points.size(); ++vertexIndex)
-        vertexIndicesByPosition.try_emplace({candidate.points[vertexIndex].x, candidate.points[vertexIndex].y}, vertexIndex);
-    std::vector<std::size_t> patchVertexIndices(patch.mesh->Vertices().size());
-    for (std::size_t patchIndex = 0; patchIndex < patch.mesh->Vertices().size(); ++patchIndex) {
-        const MeshVertex& vertex = patch.mesh->Vertices()[patchIndex];
-        const auto key = std::pair{vertex.position.x, vertex.position.y};
-        const auto existing = vertexIndicesByPosition.find(key);
-        if (existing != vertexIndicesByPosition.end()) patchVertexIndices[patchIndex] = existing->second;
-        else {
-            patchVertexIndices[patchIndex] = candidate.points.size();
-            candidate.points.push_back(vertex.position);
-            candidate.vertices.push_back(vertex);
-            vertexIndicesByPosition.emplace(key, patchVertexIndices[patchIndex]);
-        }
-    }
-
-    // Retain constraints outside the cavity and replace all contour constraints inside it.
-    const auto onBoundary = [&](const Vector2d& point) {
-        for (const auto& loop : cavityOuterLoops)
-            for (std::size_t i = 0; i < loop.size(); ++i)
-                if (OnSegment(loop[i], loop[(i + 1) % loop.size()], point)) return true;
-        return false;
-    };
-    const auto insideCavity = [&](const Vector2d& point) {
-        if (onBoundary(point)) return true;
-        bool inside = false;
-        for (const auto& loop : cavityOuterLoops)
-            if (geometry::PointInPolygon(loop, point, geometry::BoundaryPolicy::Outside)) inside = !inside;
-        return inside;
-    };
-    for (auto constraint = candidate.fixedConstraintEdges.begin(); constraint != candidate.fixedConstraintEdges.end();) {
-        const Vector2d midpoint = (candidate.points[(*constraint)[0]] + candidate.points[(*constraint)[1]]) / 2.0;
-        if (insideCavity(midpoint)) constraint = candidate.fixedConstraintEdges.erase(constraint);
-        else ++constraint;
-    }
-    for (TriangleIndex triangleIndex : cavityTriangles) RemoveTriangle(candidate.triangleMesh, triangleIndex);
-    if (!candidate.triangleMesh.hasValidTopology)
-        return {GenerationStatus::Failed, {}, "Could not remove the old cavity topology."};
-    std::set<Edge> legalizationEdges;
-    for (const MeshTriangle& patchTriangle : patch.mesh->Triangles()) {
-        const Triangle mapped{patchVertexIndices[patchTriangle.vertices[0]], patchVertexIndices[patchTriangle.vertices[1]],
-            patchVertexIndices[patchTriangle.vertices[2]]};
-        if (!AddTriangle(candidate.triangleMesh, mapped))
-            return {GenerationStatus::Failed, {}, "Replacement cavity is non-manifold."};
-        for (std::size_t corner = 0; corner < 3; ++corner)
-            legalizationEdges.insert(MakeEdge(mapped[(corner + 1) % 3], mapped[(corner + 2) % 3]));
-    }
-    for (const auto& patchConstraint : patch.mesh->Constraints()) {
-        const Edge mapped = MakeEdge(patchVertexIndices[patchConstraint[0]], patchVertexIndices[patchConstraint[1]]);
-        if (!cavityBoundaryEdges.contains(mapped)) candidate.fixedConstraintEdges.insert(mapped);
-    }
-    for (const Edge& edge : cavityBoundaryEdges) {
-        const auto uses = candidate.triangleMesh.trianglesByEdge.find(edge);
-        if (uses == candidate.triangleMesh.trianglesByEdge.end() || uses->second.triangleCount != 2)
-            return {GenerationStatus::Failed, {}, "Replacement cavity did not stitch to its full boundary."};
-        for (std::size_t useIndex = 0; useIndex < uses->second.triangleCount; ++useIndex) {
-            const TriangleOnEdge use = uses->second.triangles[useIndex];
-            const Triangle& triangle = candidate.triangleMesh.triangles[use.triangleIndex].vertexIndices;
-            for (std::size_t corner = 0; corner < 3; ++corner)
-                legalizationEdges.insert(MakeEdge(triangle[(corner + 1) % 3], triangle[(corner + 2) % 3]));
-        }
-    }
-    if (!candidate.triangleMesh.hasValidTopology ||
-        !LegalizeFromEdges(candidate.triangleMesh, candidate.points, candidate.fixedConstraintEdges, legalizationEdges))
-        return {GenerationStatus::Failed, {}, "Local constrained-Delaunay legalization failed."};
-
-    candidate.RebuildSpatialIndex();
-    auto previousState = std::move(state_);
-    state_ = std::make_unique<State>(std::move(candidate));
-    auto snapshot = CreateSnapshot();
-    if (!snapshot) {
-        state_ = std::move(previousState);
-        return {GenerationStatus::Failed, {}, "Updated navmesh failed adjacency validation."};
-    }
-    return {GenerationStatus::Success, std::move(snapshot), "Navmesh updated locally."};
 }
 
 } // namespace cdt

@@ -30,14 +30,4 @@ private:
     std::vector<WalkableRegion> regions_;
 };
 
-/// Walkable space added to or removed from the prior validated region set.
-struct WalkableRegionDelta {
-    /// Areas that became walkable in the new input, such as a shrinking obstacle.
-    std::vector<WalkableRegion> added;
-    /// Areas that stopped being walkable in the new input, such as a growing obstacle.
-    std::vector<WalkableRegion> removed;
-    /// Return true when both snapshots describe the same walkable area.
-    [[nodiscard]] bool Empty() const noexcept { return added.empty() && removed.empty(); }
-};
-
 }
