@@ -65,16 +65,25 @@ void SceneRenderer::DrawWorld(const GeometryModel& model, const GeometryValidati
     const EditorState& editor, const RenderOptions& options, const NavMesh* mesh,
     const pathfinding::PathfindingView& pathfinding) const {
     // Diagnostics are indexed in model-loop order by GeometryValidationReport.
-    if (mesh) for (const MeshTriangle& triangle : mesh->Triangles()) {
-        const Vector2 a = ToRaylib(mesh->Vertices()[triangle.vertices[0]].position);
-        const Vector2 b = ToRaylib(mesh->Vertices()[triangle.vertices[1]].position);
-        const Vector2 c = ToRaylib(mesh->Vertices()[triangle.vertices[2]].position);
-        const bool obstacle = triangle.region == TriangleRegion::Obstacle;
-        Color edge = obstacle ? obstacle_mesh_edge : traversable_mesh_edge;
-        edge.a = static_cast<unsigned char>(edge.a * (1.0f - options.navmesh_edge_transparency / 100.0f));
-        DrawLineEx(a, b, 1.5f, edge);
-        DrawLineEx(b, c, 1.5f, edge);
-        DrawLineEx(c, a, 1.5f, edge);
+    if (mesh) {
+        const auto& triangles = mesh->Triangles();
+        const auto& vertices = mesh->Vertices();
+        for (std::size_t triangle_index = 0; triangle_index < triangles.size(); ++triangle_index) {
+            const MeshTriangle& triangle = triangles[triangle_index];
+            for (std::size_t opposite_vertex = 0; opposite_vertex < triangle.vertices.size(); ++opposite_vertex) {
+                const auto neighbor_index = triangle.neighbors[opposite_vertex];
+                if (neighbor_index && *neighbor_index < triangle_index) continue;
+
+                const std::size_t first_vertex = triangle.vertices[(opposite_vertex + 1) % triangle.vertices.size()];
+                const std::size_t second_vertex = triangle.vertices[(opposite_vertex + 2) % triangle.vertices.size()];
+                const bool obstacle = triangle.region == TriangleRegion::Obstacle ||
+                    (neighbor_index && triangles[*neighbor_index].region == TriangleRegion::Obstacle);
+                Color edge = obstacle ? obstacle_mesh_edge : traversable_mesh_edge;
+                edge.a = static_cast<unsigned char>(edge.a * (1.0f - options.navmesh_edge_transparency / 100.0f));
+                DrawLineEx(ToRaylib(vertices[first_vertex].position), ToRaylib(vertices[second_vertex].position),
+                    1.5f, edge);
+            }
+        }
     }
     DrawPath(pathfinding);
     DrawEndpoints(pathfinding);

@@ -11,7 +11,7 @@ namespace cdt {
 
 struct RenderOptions {
     bool show_coordinates{false};
-    float navmesh_edge_transparency{80.0f};
+    float navmesh_edge_transparency{50.0f};
 };
 
 class SceneRenderer {
