@@ -5,7 +5,7 @@
 .codegraph/
 .codebase-memory/
 map.json
-maps/
+test-maps/
 
 # --- Compiled Binaries & Libraries ---
 *.exe

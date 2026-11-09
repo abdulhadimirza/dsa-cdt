@@ -73,7 +73,7 @@ private:
     bool auto_bake_navmesh{false};
     bool auto_update_path{false};
     double agent_radius{0.0};
-    char map_path[512]{"map.json"};
+    char map_path[512]{"sample-maps\\large_map.json"};
     std::string map_status;
 };
 
