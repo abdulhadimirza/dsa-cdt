@@ -1,0 +1,8 @@
+{
+    "cmake.generator": "Ninja",
+    "C_Cpp.default.cppStandard": "c++23",
+    "cmake.configureOnOpen": true,
+    "cmake.debugConfig": {
+        "cwd": "${workspaceFolder}"
+    }
+}
