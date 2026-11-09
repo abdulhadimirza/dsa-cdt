@@ -1,4 +1,4 @@
-# Constrained Delaunay Triangulation and Navigation Demo
+# Constrained Delaunay Triangulation and Navigation
 
 This project is an interactive 2D geometry editor. Draw boundaries and obstacles, validate the geometry, generate a navigation mesh, and find a path between selected start and goal points. Maps can be saved and loaded from the control panel.
 
