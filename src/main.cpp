@@ -25,6 +25,16 @@ constexpr int screen_width = 1280;
 constexpr int screen_height = 800;
 constexpr Color background_color{22, 25, 32, 255};
 
+/// Load the scalable default font explicitly so ImGui's AddFontDefault heuristic
+/// cannot change its choice after the first frame establishes the effective font size.
+void LoadDefaultImGuiFont() {
+    ImGuiIO& io = ImGui::GetIO();
+    ImFontConfig default_config;
+    default_config.SizePixels = 13.25f;
+    default_config.PixelSnapH = true;
+    io.Fonts->AddFontDefaultVector(&default_config);
+}
+
 /// Applies one endpoint placement update to the pathfinding session.
 void DispatchNavigationClick(const cdt::CanvasClick& click, cdt::PathfindingSession& pathfinding,
     const cdt::NavMesh* mesh, bool auto_update) {
@@ -52,6 +62,7 @@ int main() {
     InitWindow(screen_width, screen_height, "DCDT Simulation - Infinite Canvas");
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);
+    rlImGuiSetLoadFontsCallback(LoadDefaultImGuiFont);
     rlImGuiSetup(true);
 
     cdt::CameraController camera(Vector2{0.0f, 0.0f});

@@ -16,7 +16,7 @@ include(FetchContent)
 FetchContent_Declare(
     raylib
     GIT_REPOSITORY https://github.com/raysan5/raylib
-    GIT_TAG        master # Or pin to a specific release like "5.5"
+    GIT_TAG        82e087fb2db0f2c20a991ad3bdb62ec967af4caf # pinned revision
 )
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE) # Don't build raylib examples
 FetchContent_MakeAvailable(raylib)
@@ -25,7 +25,7 @@ FetchContent_MakeAvailable(raylib)
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui
-    GIT_TAG        docking # Allows dockable windows
+    GIT_TAG        cf53467ab0db7a783f04b32dd9160e6aa5b720ef # pinned docking revision
 )
 FetchContent_MakeAvailable(imgui)
 
@@ -33,7 +33,7 @@ FetchContent_MakeAvailable(imgui)
 FetchContent_Declare(
     rlimgui
     GIT_REPOSITORY https://github.com/raylib-extras/rlImGui
-    GIT_TAG        main
+    GIT_TAG        5c17e70e98ae9f50ca94bdcad0e3b3536b46a203 # pinned revision
 )
 FetchContent_MakeAvailable(rlimgui)
 
